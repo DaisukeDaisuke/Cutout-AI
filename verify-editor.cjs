@@ -17,7 +17,8 @@ const ctx=vm.createContext({console,Uint8Array,Float32Array,Map,Blob,URL,Request
  document:{getElementById:id=>{assert.ok(nodes[id],'Missing DOM id: '+id);return nodes[id];},createElement:el,querySelectorAll:()=>[],addEventListener(){},body:el()},
  navigator:{},isSecureContext:false,devicePixelRatio:1,Image:class{constructor(){return el('img');}},Worker:MockWorker,ResizeObserver:class{observe(){}},
  window:el(),requestAnimationFrame:()=>1,setTimeout(fn){timers.set(++timerId,fn);return timerId;},clearTimeout(id){timers.delete(id);},sessionStorage:{getItem(){return null;}},location:{reload(){}}});
-vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'dist/app.js'),'utf8'),ctx);
+vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'dist/outline-mask.js'),'utf8').replace(/^export /gm,''),ctx);
+vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'dist/app.js'),'utf8').replace(/^import .*;\n/gm,''),ctx);
 const run=code=>vm.runInContext(code,ctx);
 ctx.fixture=createCanvas(8,8);const fx=ctx.fixture.getContext('2d');fx.fillStyle='#e05040';fx.fillRect(0,0,8,8);
 run("images.push({id:'test',name:'test.png',url:'fixture',img:fixture,width:8,height:8,selected:true,objects:[],objectId:null,nextObject:1,history:[],feather:0,threshold:0,crop:false,mask:null,bounds:null,version:0});selectImage('test');bootReady=true;engineError='';");
@@ -31,6 +32,28 @@ function pointer(type,x,y,extra={}){
  nodes.canvas.listeners[type]({clientX:10+400*x,clientY:20+300*y,pointerId:1,pointerType:'mouse',isPrimary:true,button:0,preventDefault(){},...extra});
 }
 (async()=>{
+ // The production outline reconstruction closes seams and fills interior gaps.
+ const path=require('node:path'),{pathToFileURL}=require('node:url');
+ const {buildOutlineMask}=await import(pathToFileURL(path.join(__dirname,'dist/outline-mask.js')).href);
+ const w=40,h=32,region=()=>({choice:0,points:[],strokes:[],masks:new Float32Array(w*h).fill(-8)});
+ const left=region(),right=region();
+ for(let y=5;y<27;y++)for(let x=5;x<35;x++){
+   if(x===20||(x>=10&&x<16&&y>=11&&y<17))continue;
+   (x<20?left:right).masks[y*w+x]=8;
+ }
+ let outline=buildOutlineMask([left,right],w,h);
+ assert.equal(outline[13*w+12],255);assert.equal(outline[13*w+20],255);assert.equal(outline[3*w+20],0);assert.equal(outline[20*w+37],0);
+ // An explicit exclusion, including the middle of a stroke, must stay empty.
+ left.strokes=[{label:0,path:[{x:8/(w-1),y:13/(h-1)},{x:18/(w-1),y:13/(h-1)}]}];
+ outline=buildOutlineMask([left,right],w,h);assert.equal(outline[13*w+12],0);assert.equal(outline[20*w+20],255);
+ left.strokes=[];
+ // Keep a broad, open concavity and the space between distant objects.
+ const concave=region();for(let y=5;y<27;y++)for(let x=5;x<35;x++)if(!(x>=15&&x<=25&&y<19))concave.masks[y*w+x]=8;
+ outline=buildOutlineMask([concave],w,h);assert.equal(outline[10*w+20],0);assert.equal(outline[23*w+20],255);
+ const separated=region();for(let y=10;y<20;y++)for(let x=2;x<38;x++)if(x<9||x>30)separated.masks[y*w+x]=8;
+ assert.equal(buildOutlineMask([separated],w,h)[15*w+20],0);
+ const full=region();full.masks.fill(8);assert.ok(buildOutlineMask([full],w,h).every(a=>a===255));assert.ok(buildOutlineMask([region()],w,h).every(a=>a===0));
+ left.masks[20*w+4]=-.2;outline=buildOutlineMask([left,right],w,h);assert.equal(outline[20*w+4],64);
  run('addPoint(.2,.2)');assert.equal(run('active().objects.length'),1);assert.equal(nodes.export.disabled,true);
  result([1,1,3,3]);assert.equal(nodes.export.disabled,false);assert.equal(run('ready(active())'),true);
  run('addPoint(.7,.7)');assert.equal(run('active().objects.length'),2);assert.equal(nodes.export.disabled,true);
@@ -92,7 +115,6 @@ function pointer(type,x,y,extra={}){
  timers.get(run('watchdog'))();assert.equal(run('busy'),false);assert.equal(nodes.retry.hidden,false);assert.equal(nodes.export.disabled,true);
  const attempts=sent.length;run("$('retry').onclick()");assert.equal(sent.length,attempts+1);result([1,1,3,3]);assert.equal(nodes.export.disabled,false);assert.equal(run('active().objects.length'),1);
  // A mask covering the entire stroke beats a higher IoU mask of just one piece.
- const path=require('node:path'),{pathToFileURL}=require('node:url');
  const selection=await import(pathToFileURL(path.join(__dirname,'dist/mask-selection.js')).href);
  const maskData=new Float32Array(3*64).fill(-8);
  for(let y=1;y<7;y++)for(let x=1;x<7;x++)maskData[64+y*8+x]=8;
@@ -129,8 +151,15 @@ function pointer(type,x,y,extra={}){
  await vm.runInContext('segment(job)',workerContext);assert.deepEqual(promptSizes,[1]);assert.equal(messages.at(-1).type,'result');assert.ok(messages.every(m=>m.requestId===123));
  vm.runInContext('foreground.fill(1)',workerContext);await vm.runInContext('segment(job)',workerContext);
  assert.deepEqual(promptSizes,[1]);assert.equal(messages.at(-1).scores.length,1);
+ // Filled mask pixels use the original photo's RGB, including a distinctive pixel.
+ fx.fillStyle='#1768cb';fx.fillRect(3,3,1,1);
+ run("active().crop=false;active().feather=0;object().masks=new Float32Array(64).fill(-8);object().choice=0;for(let y=1;y<7;y++)for(let x=1;x<7;x++)object().masks[y*8+x]=8;object().masks[3*8+3]=-8;recompute(active())");
+ const filled=await run('pngBlob(active())');decoded.src=Buffer.from(await filled.arrayBuffer());await decoded.decode();
+ exported.getContext('2d').clearRect(0,0,8,8);exported.getContext('2d').drawImage(decoded,0,0);
+ assert.deepEqual(Array.from(exported.getContext('2d').getImageData(3,3,1,1).data),[23,104,203,255]);
  console.log('PASS: separate clicks; mask union; PNG alpha/dimensions; crop; drag sampling and single release inference; touch/pen; capture/cancel; one-step stroke undo; stale reply protection; bounded prompts.');
  console.log('PASS: unresponsive worker recovery and finite fallback; fresh-worker retry; IMG.LY preprocessing, complete foreground selection, plate/food union, sparse correction only when needed.');
+ console.log('PASS: one outer-contour mask; interior holes and narrow seams filled; exclusions, concavities, separate objects, image borders and soft edges preserved; PNG uses original RGB.');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 
 

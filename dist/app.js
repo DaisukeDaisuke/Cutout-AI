@@ -1,3 +1,4 @@
+import { buildOutlineMask } from './outline-mask.js?v=outline-v1';
 const $ = id => document.getElementById(id);
 const paths = {
   plus:'M12 5v14M5 12h14',close:'m6 6 12 12M18 6 6 18',download:'M12 3v12m-5-5 5 5 5-5M5 15v5h14v-5',
@@ -80,7 +81,8 @@ function thumbnail(im,o,choice=o.choice) {
   if(o.thumbnails[key]){ctx.drawImage(o.thumbnails[key],0,0);return out;}
   const {width,height}=o,n=width*height,mask=element('canvas');mask.width=width;mask.height=height;
   const mx=mask.getContext('2d'), px=mx.createImageData(width,height);let l=width,t=height,r=-1,b=-1;
-  for(let i=0;i<n;i++){const a=o.masks[choice*n+i]+im.threshold>0?255:0;px.data[i*4+3]=a;if(a){const x=i%width,y=Math.floor(i/width);l=Math.min(l,x);r=Math.max(r,x);t=Math.min(t,y);b=Math.max(b,y);}}
+  const alpha=buildOutlineMask([{...o,choice}],width,height,im.threshold);
+  for(let i=0;i<n;i++){const a=alpha[i];px.data[i*4+3]=a;if(a){const x=i%width,y=Math.floor(i/width);l=Math.min(l,x);r=Math.max(r,x);t=Math.min(t,y);b=Math.max(b,y);}}
   mx.putImageData(px,0,0);mx.globalCompositeOperation='source-in';mx.drawImage(im.img,0,0,width,height);
   if(r>=l){const w=r-l+1,h=b-t+1,s=Math.min(144/w,96/h);ctx.drawImage(mask,l,t,w,h,(160-w*s)/2,(112-h*s)/2,w*s,h*s);}
   o.thumbnails[key]=out;return out;
@@ -131,10 +133,10 @@ function recompute(im) {
   if (!objects.length) { im.mask = null; im.bounds = null; updateButtons(); return; }
   const { width, height } = objects[0];
   const c = document.createElement('canvas'); c.width = width; c.height = height; const ctx = c.getContext('2d'); const pixels = ctx.createImageData(width, height); const n = width * height;
+  const outline = buildOutlineMask(objects,width,height,im.threshold);
   let left = width, top = height, right = -1, bottom = -1;
   for (let i = 0; i < n; i++) {
-    let logit = -Infinity; for (const o of objects) logit = Math.max(logit, o.masks[o.choice * n + i]);
-    const alpha = Math.max(0, Math.min(255, Math.round((logit + im.threshold + .4) / .8 * 255)));
+    const alpha = outline[i];
     const k = i * 4; pixels.data[k] = 255; pixels.data[k+1] = 255; pixels.data[k+2] = 255; pixels.data[k+3] = alpha;
     if (alpha > 0) { const x = i % width, y = Math.floor(i / width); left = Math.min(left, x); right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y); }
   }
