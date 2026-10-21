@@ -24,7 +24,7 @@ export function nextCorrection(data,offset,width,height,points,used){
 }
 // Drop disconnected predictions that no positive stroke touched.
 export function retainTouchedComponents(data,width,height,points){
-  const n=width*height,seen=new Uint8Array(n),queue=new Int32Array(n),anchors=new Uint8Array(n);
+  const n=width*height,seen=new Uint8Array(n),queue=new Int32Array(n),anchors=new Uint8Array(n),kept=new Uint8Array(n);
   for(const p of points)if(p.label===1){
     const x=Math.min(width-1,Math.max(0,Math.round(p.x*width-.5))),y=Math.min(height-1,Math.max(0,Math.round(p.y*height-.5)));
     for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)if(x+dx>=0&&x+dx<width&&y+dy>=0&&y+dy<height)anchors[(y+dy)*width+x+dx]=1;
@@ -40,7 +40,16 @@ export function retainTouchedComponents(data,width,height,points){
         if(!seen[j]&&data[j]>0){seen[j]=1;queue[tail++]=j;}
       }
     }
-    if(!touched)for(let i=0;i<tail;i++)data[queue[i]]=-8;
+    for(let i=0;i<tail;i++)if(touched)kept[queue[i]]=1;else data[queue[i]]=-8;
+  }
+  // An unselected island's negative edge logits can still be translucent.
+  // Preserve soft edges only immediately around a retained component.
+  for(let i=0;i<n;i++)if(!kept[i]&&data[i]>-8){
+    const x=i%width,y=Math.floor(i/width);let edge=false;
+    for(let dy=-1;dy<=1&&!edge;dy++)for(let dx=-1;dx<=1;dx++){
+      if(x+dx>=0&&x+dx<width&&y+dy>=0&&y+dy<height&&kept[(y+dy)*width+x+dx]){edge=true;break;}
+    }
+    if(!edge)data[i]=-8;
   }
   return data;
 }

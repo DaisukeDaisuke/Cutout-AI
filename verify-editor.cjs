@@ -100,8 +100,8 @@ function pointer(type,x,y,extra={}){
  const checks=[{x:.3,y:.3,label:1},{x:.7,y:.7,label:1},{x:.95,y:.95,label:0}];
  const ranked=selection.rankMasks(maskData,[.99,.8,.98],8,8,checks);assert.equal(ranked.indexOf(Math.max(...ranked)),1);
  assert.equal(selection.nextCorrection(maskData,0,8,8,checks,[0]),1);
- const islands=new Float32Array(64).fill(-8);islands[2*8+2]=8;islands[7*8+7]=8;
- selection.retainTouchedComponents(islands,8,8,checks);assert.equal(islands[2*8+2],8);assert.equal(islands[7*8+7],-8);
+ const islands=new Float32Array(64).fill(-8);islands[2*8+2]=8;islands[7*8+7]=8;islands[6*8+7]=-.2;islands[2*8+3]=-.2;
+ selection.retainTouchedComponents(islands,8,8,checks);assert.equal(islands[2*8+2],8);assert.equal(islands[7*8+7],-8);assert.equal(islands[6*8+7],-8);assert.ok(islands[2*8+3]>-1);
  // Exercise the real worker loop: 64 stroke samples must not all enter the decoder.
  const foreground=await import(pathToFileURL(path.join(__dirname,'dist/foreground.js')).href);
  // ISNet preprocessing must match the published RGB normalization, without padding.

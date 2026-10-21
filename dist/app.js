@@ -218,7 +218,7 @@ function failWorker(message){
 }
 function ensureWorker(){
   if(worker)return;
-  worker=new Worker('./inference-worker.js?v=imgly-v2',{type:'module'});
+  worker=new Worker('./inference-worker.js?v=imgly-v3',{type:'module'});
   const instance=worker;
   worker.onmessage=({data})=>{
     if(worker!==instance||!activeRequest||data.requestId!==activeRequest.requestId)return;

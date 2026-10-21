@@ -1,4 +1,4 @@
-import { rankMasks, nextCorrection, retainTouchedComponents } from './mask-selection.js';
+import { rankMasks, nextCorrection, retainTouchedComponents } from './mask-selection.js?v=imgly-v3';
 import { isnetInput, resizeAlpha, selectForeground, combineForeground, alphaToMask } from './foreground.js';
 const REVISION = '5850ab45f587c112167512ffef949107115e26a0';
 const ISNET_REVISION = '440dea96dd4a3b06bbbf5abec3e26569dd7ec49f';
