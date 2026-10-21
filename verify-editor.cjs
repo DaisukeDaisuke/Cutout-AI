@@ -11,12 +11,12 @@ function el(tag='div'){
 const html=fs.readFileSync(require('node:path').join(__dirname,'dist/index.html'),'utf8');
 const nodes=Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(m=>[m[1],el(['canvas','result','stroke-overlay'].includes(m[1])?'canvas':'div')]));
 nodes.feather.value='1';nodes.threshold.value='0';
-const sent=[];
-class MockWorker {postMessage(job){sent.push(structuredClone(job));}terminate(){}}
+const sent=[],workers=[],timers=new Map();let timerId=0;
+class MockWorker {constructor(){workers.push(this);}postMessage(job){sent.push(structuredClone(job));}terminate(){this.terminated=true;}}
 const ctx=vm.createContext({console,Uint8Array,Float32Array,Map,Blob,URL,Request,Response,ReadableStream,
  document:{getElementById:id=>{assert.ok(nodes[id],'Missing DOM id: '+id);return nodes[id];},createElement:el,querySelectorAll:()=>[],addEventListener(){},body:el()},
  navigator:{},isSecureContext:false,devicePixelRatio:1,Image:class{constructor(){return el('img');}},Worker:MockWorker,ResizeObserver:class{observe(){}},
- window:el(),requestAnimationFrame:()=>1,setTimeout:()=>0,clearTimeout(){},sessionStorage:{getItem(){return null;}},location:{reload(){}}});
+ window:el(),requestAnimationFrame:()=>1,setTimeout(fn){timers.set(++timerId,fn);return timerId;},clearTimeout(id){timers.delete(id);},sessionStorage:{getItem(){return null;}},location:{reload(){}}});
 vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'dist/app.js'),'utf8'),ctx);
 const run=code=>vm.runInContext(code,ctx);
 ctx.fixture=createCanvas(8,8);const fx=ctx.fixture.getContext('2d');fx.fillStyle='#e05040';fx.fillRect(0,0,8,8);
@@ -83,7 +83,54 @@ function pointer(type,x,y,extra={}){
  assert.ok(run('stroke.path.length')<=1024);pointer('pointerup',1.2,.5,{pointerType:'pen'});
  const extra=sent.at(-1).points.slice(prompts.length);assert.ok(extra.length<=64);assert.equal(extra.at(-1).x,1);assert.ok(extra.every(p=>p.x>=0&&p.x<=1&&p.y>=0&&p.y<=1));
  result([1,1,7,7]);run('undo();undo()');assert.equal(run('active().objects.length'),0);
+ // An unresponsive worker is replaced, with finite backend fallbacks and retry.
+ run("setTool('add');addPoint(.2,.2)");const hung=workers.at(-1),originalRequest=sent.at(-1);
+ timers.get(run('watchdog'))();assert.equal(hung.terminated,true);assert.equal(sent.at(-1).mode,'wasm');
+ assert.equal(run('active().objects.length'),1);assert.notEqual(sent.at(-1).requestId,originalRequest.requestId);
+ hung.onmessage({data:{type:'error',requestId:sent.at(-1).requestId,message:'stale worker'}});assert.equal(sent.at(-1).mode,'wasm');
+ timers.get(run('watchdog'))();assert.equal(sent.at(-1).mode,'single');
+ timers.get(run('watchdog'))();assert.equal(run('busy'),false);assert.equal(nodes.retry.hidden,false);assert.equal(nodes.export.disabled,true);
+ const attempts=sent.length;run("$('retry').onclick()");assert.equal(sent.length,attempts+1);result([1,1,3,3]);assert.equal(nodes.export.disabled,false);assert.equal(run('active().objects.length'),1);
+ // A mask covering the entire stroke beats a higher IoU mask of just one piece.
+ const path=require('node:path'),{pathToFileURL}=require('node:url');
+ const selection=await import(pathToFileURL(path.join(__dirname,'dist/mask-selection.js')).href);
+ const maskData=new Float32Array(3*64).fill(-8);
+ for(let y=1;y<7;y++)for(let x=1;x<7;x++)maskData[64+y*8+x]=8;
+ maskData[2*8+2]=8;maskData.fill(8,128);
+ const checks=[{x:.3,y:.3,label:1},{x:.7,y:.7,label:1},{x:.95,y:.95,label:0}];
+ const ranked=selection.rankMasks(maskData,[.99,.8,.98],8,8,checks);assert.equal(ranked.indexOf(Math.max(...ranked)),1);
+ assert.equal(selection.nextCorrection(maskData,0,8,8,checks,[0]),1);
+ const islands=new Float32Array(64).fill(-8);islands[2*8+2]=8;islands[7*8+7]=8;
+ selection.retainTouchedComponents(islands,8,8,checks);assert.equal(islands[2*8+2],8);assert.equal(islands[7*8+7],-8);
+ // Exercise the real worker loop: 64 stroke samples must not all enter the decoder.
+ const foreground=await import(pathToFileURL(path.join(__dirname,'dist/foreground.js')).href);
+ // ISNet preprocessing must match the published RGB normalization, without padding.
+ const input=foreground.isnetInput({data:new Uint8Array([0,128,255,64,192,128]),width:2,height:1,channels:3},2);
+ assert.deepEqual(Array.from(input),[-.5,-.25,-.5,-.25,0,.25,0,.25,127/256,0,127/256,0]);
+ // A selected dish retains its interior and soft edge, without a separate glass.
+ const alpha=new Float32Array(64);for(let y=1;y<4;y++)for(let x=1;x<4;x++)alpha[y*8+x]=1;
+ alpha[1*8+4]=.5;alpha[6*8+6]=1;
+ const dish=foreground.selectForeground(alpha,8,8,[{x:.3,y:.3,label:1}]);
+ assert.equal(dish.needsRefinement,false);assert.equal(dish.alpha[2*8+2],1);assert.equal(dish.alpha[6*8+6],0);assert.equal(dish.alpha[1*8+4],.5);
+ assert.equal(foreground.selectForeground(alpha,8,8,[{x:.3,y:.3,label:1},{x:.8,y:.8,label:1}]).alpha[6*8+6],1);
+ assert.equal(foreground.selectForeground(alpha,8,8,[{x:.3,y:.3,label:1},{x:.5,y:.7,label:1}]).needsRefinement,true);
+ const plate=new Float32Array(64).fill(-8);for(let y=1;y<6;y++)for(let x=1;x<6;x++)plate[y*8+x]=8;plate[2*8+2]=-8;
+ const combined=foreground.combineForeground(dish,plate,[1],8,8,[{x:.3,y:.3,label:1}],selection.rankMasks);
+ assert.equal(combined.masks[2*8+2],8);assert.equal(combined.masks[5*8+5],8);assert.equal(combined.masks[6*8+6],-8);assert.equal(combined.masks[0],-8);
+ const messages=[],promptSizes=[];
+ class Tensor {constructor(type,data,dims){Object.assign(this,{type,data,dims});}dispose(){}}
+ const workerContext=vm.createContext({...selection,...foreground,console,Float32Array,Array,BigInt,Tensor,
+   self:{postMessage:data=>messages.push(data)},navigator:{},
+   fakeModel:async inputs=>{promptSizes.push(inputs.input_labels.data.length);return {pred_masks:new Tensor('float32',new Float32Array(3*64).fill(8),[1,1,3,8,8]),iou_scores:new Tensor('float32',[.9,.8,.7],[1,1,3])};},
+ });
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'dist/inference-worker.js'),'utf8').replace(/^import .*;\n/gm,''),workerContext);
+ vm.runInContext("lib={Tensor};foregroundModel={};foreground=new Float32Array(64);outputWidth=8;outputHeight=8;model=fakeModel;currentImage='fixture';embeddings={};processed={reshaped_input_sizes:[[1024,1024]],original_sizes:[[8,8]]};processor={image_processor:{pad_size:{width:1024,height:1024}},post_process_masks:async x=>[x]};",workerContext);
+ workerContext.job={imageId:'fixture',requestId:123,points:Array.from({length:64},(_,i)=>({x:.2+i/128,y:.5,label:1}))};
+ await vm.runInContext('segment(job)',workerContext);assert.deepEqual(promptSizes,[1]);assert.equal(messages.at(-1).type,'result');assert.ok(messages.every(m=>m.requestId===123));
+ vm.runInContext('foreground.fill(1)',workerContext);await vm.runInContext('segment(job)',workerContext);
+ assert.deepEqual(promptSizes,[1]);assert.equal(messages.at(-1).scores.length,1);
  console.log('PASS: separate clicks; mask union; PNG alpha/dimensions; crop; drag sampling and single release inference; touch/pen; capture/cancel; one-step stroke undo; stale reply protection; bounded prompts.');
+ console.log('PASS: unresponsive worker recovery and finite fallback; fresh-worker retry; IMG.LY preprocessing, complete foreground selection, plate/food union, sparse correction only when needed.');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 
 

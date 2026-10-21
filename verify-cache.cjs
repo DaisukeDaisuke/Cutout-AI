@@ -10,11 +10,13 @@ const cache = {
   async delete(k) { return entries.delete(typeof k === 'string' ? k : k.url); },
   async keys() { return [...entries.keys()].map(url => ({url})); },
 };
-let upstream, downloads = 0;
-const context = vm.createContext({ importScripts(){}, hashwasm, console, Request, Response, ReadableStream, URL, Uint8Array, Map,
+let upstream, downloads = 0, stall=false, signal;
+const timers=new Map();let timerId=0;
+const context = vm.createContext({ importScripts(){}, hashwasm, console, Request, Response, ReadableStream, URL, Uint8Array, Map,AbortController,
+  setTimeout(fn){timers.set(++timerId,fn);return timerId;},clearTimeout(id){timers.delete(id);},
   self:{location:{origin:'https://test.example',href:'https://test.example/repository-name/coi-serviceworker.js'},clients:{async matchAll(){return[];}}},
   caches:{async open(){return cache;}},
-  async fetch(){downloads++;let i=0;return new Response(new ReadableStream({pull(c){if(i>=upstream.length){c.close();return;}const end=Math.min(upstream.length,i+703117);c.enqueue(upstream.subarray(i,end));i=end;}}));}
+  async fetch(url,options){downloads++;if(stall){signal=options.signal;return new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(Error('Timed out')),{once:true}));}let i=0;return new Response(new ReadableStream({pull(c){if(i>=upstream.length){c.close();return;}const end=Math.min(upstream.length,i+703117);c.enqueue(upstream.subarray(i,end));i=end;}}));}
 });
 vm.runInContext(fs.readFileSync('dist/model-cache.js','utf8'), context);
 async function run(code) { return vm.runInContext(code, context); }
@@ -46,5 +48,14 @@ async function run(code) { return vm.runInContext(code, context); }
   entries.clear();upstream[111]^=1;
   const bad=await run("modelResponse(new Request(self.location.origin+MODEL_PREFIX+'onnx/vision_encoder.onnx'))");
   assert.equal(bad.status,502);assert.equal(entries.size,0);
+  // A stalled fetch cannot hold the shared in-flight promise forever.
+  stall=true;
+  const stalled=run("modelResponse(new Request(self.location.origin+MODEL_PREFIX+'config.json'))");
+  while(!signal)await new Promise(resolve=>setImmediate(resolve));
+  for(const timer of timers.values())timer();
+  assert.equal((await stalled).status,502);assert.equal(await run('inFlight.size'),0);
+  stall=false;upstream=new TextEncoder().encode('{}');
+  const retried=await run("modelResponse(new Request(self.location.origin+MODEL_PREFIX+'config.json'))");assert.equal(retried.status,200);assert.equal(await retried.text(),'{}');
   console.log('PASS: GitHub Pages subpath; 50 MB split; byte-exact reconstruction; cache reuse; xxHash corruption repair; bad download rejected.');
+  console.log('PASS: stalled download aborts and releases in-flight entry; next attempt succeeds.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

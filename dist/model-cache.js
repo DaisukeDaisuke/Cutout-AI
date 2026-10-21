@@ -1,6 +1,6 @@
 /* Service-worker model store. 50 MB means 50,000,000 bytes (decimal). */
 importScripts('https://cdn.jsdelivr.net/npm/hash-wasm@4.12.0/dist/xxhash64.umd.min.js');
-const MODEL_CACHE = 'kirinuki-model-parts-v1';
+const MODEL_CACHE = 'kirinuki-model-parts-v2';
 const MODEL_REVISION = '5850ab45f587c112167512ffef949107115e26a0';
 const APP_BASE = new URL('./', self.location.href).pathname;
 const MODEL_ROUTE = `${APP_BASE}__models__/`;
@@ -12,6 +12,13 @@ const MODEL_FILES = {
   'config.json': null,
   'preprocessor_config.json': null,
 };
+const MODEL_SOURCES = [
+  {prefix:MODEL_PREFIX,files:MODEL_FILES},
+  {prefix:`${MODEL_ROUTE}imgly/isnet-general-onnx/resolve/440dea96dd4a3b06bbbf5abec3e26569dd7ec49f/`,files:{
+    'onnx/model.onnx':{bytes:176149806,hash:'5def2979ea4340f0'},
+    'config.json':null,
+  }},
+];
 const inFlight = new Map();
 function isModelRequest(request) {
   const url = new URL(request.url);
@@ -21,7 +28,7 @@ async function cacheNotice(phase, file, loaded = 0, total = 0) {
   const clients = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' });
   for (const client of clients) client.postMessage({ type: 'model-cache', phase, file, loaded, total });
 }
-function partKey(path, part) { return `${self.location.origin}${APP_BASE}__model_parts__/${MODEL_REVISION}/${encodeURIComponent(path)}/${part}`; }
+function partKey(path, part) { return `${self.location.origin}${APP_BASE}__model_parts__/${encodeURIComponent(path)}/${part}`; }
 async function removeModel(cache, path) {
   const prefix = partKey(path, '');
   for (const key of await cache.keys()) if (key.url.startsWith(prefix)) await cache.delete(key);
@@ -57,8 +64,14 @@ async function inspectCache(cache, path, spec) {
 }
 async function downloadModel(cache, path, spec) {
   await removeModel(cache, path);
-  const upstream = `https://huggingface.co/Xenova/slimsam-77-uniform/resolve/${MODEL_REVISION}/${path}`;
-  const response = await fetch(upstream, { mode: 'cors', credentials: 'omit' });
+  const upstream = `https://huggingface.co/${path}`;
+  const abort=new AbortController();let timer;
+  const renew=()=>{clearTimeout(timer);timer=setTimeout(()=>abort.abort(),45000);};
+  renew();
+  let response;
+  try{response=await fetch(upstream,{mode:'cors',credentials:'omit',signal:abort.signal});}
+  catch(error){clearTimeout(timer);throw error;}
+  clearTimeout(timer);
   if (!response.ok || !response.body) throw Error(`モデルの取得に失敗しました (HTTP ${response.status})`);
   const hasher = await hashwasm.createXXHash64();
   hasher.init();
@@ -68,7 +81,9 @@ async function downloadModel(cache, path, spec) {
   let offset = 0, parts = 0, total = 0, lastNotice = 0;
   try {
     for (;;) {
+      renew();
       const { done, value } = await reader.read();
+      clearTimeout(timer);
       if (done) break;
       hasher.update(value);
       total += value.byteLength;
@@ -103,15 +118,17 @@ async function downloadModel(cache, path, spec) {
     await reader.cancel().catch(() => {});
     await removeModel(cache, path);
     throw error;
-  }
+  } finally {clearTimeout(timer);}
 }
 async function modelResponse(request) {
   const pathname = new URL(request.url).pathname;
-  const path = pathname.slice(MODEL_PREFIX.length);
-  if (!pathname.startsWith(MODEL_PREFIX) || !Object.hasOwn(MODEL_FILES, path) || request.method !== 'GET') return new Response('Unknown model file', { status: 404 });
+  const source=MODEL_SOURCES.find(s=>pathname.startsWith(s.prefix));
+  const file=source&&pathname.slice(source.prefix.length);
+  if (!source || !Object.hasOwn(source.files, file) || request.method !== 'GET') return new Response('Unknown model file', { status: 404 });
+  const path=pathname.slice(MODEL_ROUTE.length),spec=source.files[file];
   const cache = await caches.open(MODEL_CACHE);
   if (!inFlight.has(path)) {
-    const prepare = (async () => await inspectCache(cache, path, MODEL_FILES[path]) || await downloadModel(cache, path, MODEL_FILES[path]))();
+    const prepare = (async () => await inspectCache(cache, path, spec) || await downloadModel(cache, path, spec))();
     inFlight.set(path, prepare);
     prepare.finally(() => inFlight.delete(path)).catch(() => {});
   }

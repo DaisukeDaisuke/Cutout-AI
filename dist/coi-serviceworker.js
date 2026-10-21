@@ -9,6 +9,8 @@ if (typeof window === 'undefined') {
     self.addEventListener("message", (ev) => {
         if (!ev.data) {
             return;
+        } else if (ev.data.type === 'model-store-version') {
+            ev.source?.postMessage({type:'model-store-version',token:ev.data.token,version:'imgly-v2'});
         } else if (ev.data.type === "deregister") {
             self.registration
                 .unregister()

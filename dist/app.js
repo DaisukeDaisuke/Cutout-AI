@@ -12,6 +12,7 @@ let localId = 0;
 const nextId = () => 'local-'+(++localId);
 let activeId = null, tool = 'add', background = 'transparent', showOriginal = false;
 let worker, busy = false, requestCounter = 0, activeRequest = null, bootReady = false, engineError = '';
+let workerMode = 'auto', watchdog = 0, attemptDeadline = 0;
 let saving = false, toastTimer, keyboardVisible = false;
 let stroke = null, strokeFrame = 0;
 const pending = new Map();
@@ -198,13 +199,34 @@ function reportProgress(message,progress){
   const im=images.find(i=>i.id===activeRequest?.imageId);
   if(im){im.message=message;im.progress=progress;if(im.id===activeId)renderResultState();}
 }
+function watchWorker(){
+  clearTimeout(watchdog);
+  if(!activeRequest)return;
+  watchdog=setTimeout(()=>failWorker('処理から応答がありませんでした。もう一度試してください。'),Math.max(0,Math.min(60000,attemptDeadline-Date.now())));
+}
+function failWorker(message){
+  const job=activeRequest,im=images.find(i=>i.id===job?.imageId),o=im?.objects.find(o=>o.id===job.objectId);
+  clearTimeout(watchdog);worker?.terminate();worker=null;busy=false;activeRequest=null;
+  if(o&&o.version===job.version&&im.version===job.imageVersion){
+    if(workerMode!=='single'){
+      workerMode=workerMode==='auto'?'wasm':'single';
+      im.message='別の方法で切り抜きをやり直しています';im.progress=null;
+      pending.set(im.id+':'+o.id,{im,o});
+    }else{o.error=message;im.progress=null;}
+  }
+  updateButtons();draw();processQueue();
+}
 function ensureWorker(){
   if(worker)return;
   worker=new Worker('./inference-worker.js',{type:'module'});
+  const instance=worker;
   worker.onmessage=({data})=>{
-    if(data.type==='status'){reportProgress(data.message,data.progress);return;}
+    if(worker!==instance||!activeRequest||data.requestId!==activeRequest.requestId)return;
+    if(data.type==='status'){watchWorker();reportProgress(data.message,data.progress);return;}
     if(data.type==='runtime'){$('runtime').textContent=data.runtime+' / クロスオリジン分離: '+(data.isolated?'有効':'無効');return;}
-    if(!activeRequest||data.requestId!==activeRequest.requestId)return;
+    if(data.type==='error'){failWorker(data.message||'処理に失敗しました');return;}
+    if(data.type!=='result')return;
+    if(!Number.isInteger(data.width)||!Number.isInteger(data.height)||data.width<1||data.height<1||!data.scores?.length||data.masks?.length!==data.width*data.height*data.scores.length){failWorker('切り抜き結果を読み込めませんでした');return;}
     const job=activeRequest,im=images.find(i=>i.id===job.imageId),o=im?.objects.find(o=>o.id===job.objectId);
     if(o&&o.version===job.version&&im.version===job.imageVersion){
       if(data.type==='result'){
@@ -213,13 +235,12 @@ function ensureWorker(){
         recompute(im);if(im.id===activeId)status(im.mask?'切り抜きができました':'別の場所を選び直してください');
       }else if(data.type==='error'){o.error=data.message||'処理に失敗しました';}
     }
-    busy=false;activeRequest=null;renderLibrary();if(im?.id===activeId){renderObjects();draw();}updateButtons();processQueue();
+    clearTimeout(watchdog);busy=false;activeRequest=null;renderLibrary();if(im?.id===activeId){renderObjects();draw();}updateButtons();processQueue();
   };
   worker.onerror=event=>{
-    const im=images.find(i=>i.id===activeRequest?.imageId),o=im?.objects.find(o=>o.id===activeRequest?.objectId);
-    if(o)o.error=event.message||'処理を開始できませんでした';
-    busy=false;activeRequest=null;worker.terminate();worker=null;updateButtons();draw();processQueue();
+    if(worker===instance)failWorker(event.message||'処理を開始できませんでした');
   };
+  worker.onmessageerror=()=>{if(worker===instance)failWorker('切り抜き結果を受信できませんでした');};
 }
 function queueObject(im,o){
   o.version++;o.masks=null;o.scores=[];o.thumbnails={};o.error='';
@@ -232,11 +253,13 @@ function processQueue(){
   if(!images.includes(im)||!im.objects.includes(o)||!o.points.some(p=>p.label===1)){processQueue();return;}
   try{ensureWorker();}catch(error){o.error=error.message;draw();return;}
   busy=true;activeRequest={requestId:++requestCounter,imageId:im.id,objectId:o.id,version:o.version,imageVersion:im.version};
-  worker.postMessage({type:'segment',...activeRequest,url:im.url,points:o.points});updateButtons();
+  attemptDeadline=Date.now()+180000;watchWorker();
+  try{worker.postMessage({type:'segment',...activeRequest,url:im.url,points:o.points,mode:workerMode});}catch(error){failWorker(error.message);}
+  updateButtons();
 }
 const clamp = value => Math.max(0,Math.min(1,value));
 // Arc-length sampling makes slow, fast and coalesced pointer events equivalent.
-// Keep every gesture as one prompt group, with at most 64 decoder points.
+// Keep each gesture as one group, with at most 64 coverage samples.
 function sampleStroke(path,im,label){
   const scale=Math.max(im.width,im.height);
   const distance=(a,b)=>Math.hypot((a.x-b.x)*im.width/scale,(a.y-b.y)*im.height/scale);
@@ -375,6 +398,7 @@ $('export-batch').onclick=async()=>{
 };
 navigator.serviceWorker?.addEventListener('message',({data})=>{
   if(data.type!=='model-cache'||!busy)return;
+  if(data.phase==='download'||data.phase==='verified'||data.phase==='verify')watchWorker();
   if(data.phase==='download')reportProgress('初回の準備中 · '+(data.loaded/1e6).toFixed(1)+' / '+(data.total/1e6).toFixed(1)+' MB',data.total?data.loaded/data.total*100:undefined);
   if(data.phase==='verify')reportProgress('保存済みデータを確認しています');
   if(data.phase==='repair')reportProgress('処理に必要なデータを取り直しています');
@@ -386,7 +410,21 @@ async function boot(){
   let timer;
   try{
     await Promise.race([
-      (async()=>{await navigator.serviceWorker.ready;if(!navigator.serviceWorker.controller)await new Promise(resolve=>navigator.serviceWorker.addEventListener('controllerchange',resolve,{once:true}));})(),
+      (async()=>{
+        const registration=navigator.serviceWorker.register('./coi-serviceworker.js',{updateViaCache:'none'});
+        await registration;
+        await navigator.serviceWorker.ready;
+        if(!navigator.serviceWorker.controller)await new Promise(resolve=>navigator.serviceWorker.addEventListener('controllerchange',resolve,{once:true}));
+        await new Promise(resolve=>{
+          const sw=navigator.serviceWorker,token=String(Date.now());
+          const check=()=>sw.controller?.postMessage({type:'model-store-version',token});
+          const receive=({data})=>{
+            if(data.type!=='model-store-version'||data.token!==token||data.version!=='imgly-v2')return;
+            sw.removeEventListener('message',receive);sw.removeEventListener('controllerchange',check);resolve();
+          };
+          sw.addEventListener('message',receive);sw.addEventListener('controllerchange',check);check();
+        });
+      })(),
       new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Service Workerの準備がタイムアウトしました')),30000);})
     ]);
     if(!crossOriginIsolated&&!sessionStorage.getItem('kirinukiIsolationReload')){sessionStorage.setItem('kirinukiIsolationReload','1');location.reload();return;}
