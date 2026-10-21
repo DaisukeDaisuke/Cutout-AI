@@ -1,4 +1,5 @@
 import { buildOutlineMask } from './outline-mask.js?v=outline-v1';
+import { applyErasures } from './erase-paint.js?v=paint-v1';
 const $ = id => document.getElementById(id);
 const paths = {
   plus:'M12 5v14M5 12h14',close:'m6 6 12 12M18 6 6 18',download:'M12 3v12m-5-5 5 5 5-5M5 15v5h14v-5',
@@ -16,6 +17,8 @@ let worker, busy = false, requestCounter = 0, activeRequest = null, bootReady = 
 let workerMode = 'auto', watchdog = 0, attemptDeadline = 0;
 let saving = false, toastTimer, keyboardVisible = false;
 let stroke = null, strokeFrame = 0;
+let eraseStroke = null, eraseFrame = 0, eraseSize = 2;
+const eraseSizes = [8,16,32,64,96];
 const pending = new Map();
 const keyboardPoint = { x:.5, y:.5 };
 function active() { return images.find(im => im.id === activeId); }
@@ -27,7 +30,7 @@ function selectedObjects(im) { return im?.objects.filter(o => o.enabled && o.poi
 function waiting(im) { return selectedObjects(im).some(o => !o.masks); }
 function ready(im) { return !!im?.mask && !waiting(im) && stroke?.imageId!==im.id; }
 function createObject(im) { const o={id:nextId(),number:im.nextObject++,enabled:true,points:[],strokes:[],masks:null,scores:[],choice:0,version:0,error:''};im.objects.push(o);im.objectId=o.id;return o; }
-function saveHistory(im) { im.history.push({objects:im.objects.map(o=>({...o,points:o.points.map(p=>({...p})),strokes:[...o.strokes]})),objectId:im.objectId});if(im.history.length>20)im.history.shift(); }
+function saveHistory(im) { im.history.push({objects:im.objects.map(o=>({...o,points:o.points.map(p=>({...p})),strokes:[...o.strokes]})),objectId:im.objectId,erasures:[...(im.erasures||[])]});if(im.history.length>20)im.history.shift(); }
 
 async function addFiles(files) {
   let firstAdded;
@@ -39,7 +42,7 @@ async function addFiles(files) {
       const img=new Image();img.src=url;await img.decode();
       if(img.naturalWidth*img.naturalHeight>50_000_000)throw Error('5,000万画素以下の画像を選択してください');
       const im={id:nextId(),name:file.name,url,img,width:img.naturalWidth,height:img.naturalHeight,selected:true,objects:[],objectId:null,nextObject:1,history:[],feather:1,threshold:0,crop:false,mask:null,bounds:null,version:0,message:'',progress:null};
-      images.push(im);firstAdded ||= im.id;
+      im.erasures=[];images.push(im);firstAdded ||= im.id;
     } catch(error) {URL.revokeObjectURL(url);toast(file.name+': '+(error.message.includes('画素')?error.message:'画像を読み込めません'));}
   }
   selectImage(firstAdded || activeId);
@@ -61,7 +64,7 @@ function renderLibrary() {
   $('image-count').textContent=images.length;updateButtons();
 }
 function selectImage(id) {
-  cancelStroke();
+  cancelStroke();cancelErase();$('erase-cursor').hidden=true;
   activeId=images.find(i=>i.id===id)?.id||null;const im=active();
   $('empty').hidden=!!im;$('editing').hidden=!im;showOriginal=false;tool='add';keyboardVisible=false;
   $('finishing').open=false;
@@ -114,7 +117,12 @@ function renderCandidates() {
 }
 function updateButtons() {
   const im=active(),o=object(im);
-  $('export').disabled=!ready(im)||saving;$('show-original').disabled=!im?.mask;
+  const painting=!!eraseStroke;
+  $('export').disabled=!ready(im)||saving||painting;$('show-original').disabled=!im?.mask||painting;
+  $('erase-undo').disabled=!im?.history.length&&!painting;
+  for(let i=0;i<eraseSizes.length;i++){$('erase-size-'+i).disabled=!ready(im)||showOriginal||painting;$('erase-size-'+i).setAttribute('aria-pressed',String(i===eraseSize));}
+  $('result').classList.toggle('erasable',ready(im)&&!showOriginal);
+  if(!ready(im)||showOriginal)$('erase-cursor').hidden=true;
   $('show-original').setAttribute('aria-pressed',String(showOriginal));$('show-original').textContent=showOriginal?'切り抜きに戻る':'元の写真と見比べる';
   $('undo').disabled=!im?.history.length;$('reset').disabled=!im?.objects.length;$('refine').disabled=!o;
   $('refine').setAttribute('aria-expanded',String(tool!=='add'&&!!o));$('refine-tools').hidden=tool==='add'||!o;
@@ -123,7 +131,7 @@ function updateButtons() {
   $('action-label').textContent={add:'なぞって選ぶ',keep:'なぞって広げる',remove:'なぞって除く'}[tool];
   for(const id of ['feather','threshold','crop'])$(id).disabled=!im?.mask;
   const count=images.filter(im=>im.selected&&ready(im)).length;
-  $('export-batch').disabled=!count||saving;$('batch-label').textContent=count?count+'枚をまとめて保存':'まとめて保存';
+  $('export-batch').disabled=!count||saving||painting;$('batch-label').textContent=count?count+'枚をまとめて保存':'まとめて保存';
   $('batch-count').textContent=count?'選択した完成画像をZIPで保存':'完成した画像をZIPで保存';
 }
 function updateAdjustmentLabels() { $('feather-value').textContent=$('feather').value;const t=Number($('threshold').value);$('threshold-value').textContent=t===0?'標準':t>0?'広め':'狭め'; }
@@ -144,10 +152,20 @@ function recompute(im) {
   if (im.feather > 0) { const smooth = document.createElement('canvas'); smooth.width = width; smooth.height = height; const sx = smooth.getContext('2d'); sx.filter = `blur(${im.feather * width / im.width}px)`; sx.drawImage(c, 0, 0); im.mask = smooth; } else im.mask = c;
   const pad = Math.ceil(im.feather * 3 + 2);
   im.bounds = right < left ? null : { x: Math.max(0, Math.floor(left / width * im.width) - pad), y: Math.max(0, Math.floor(top / height * im.height) - pad), right: Math.min(im.width, Math.ceil((right+1) / width * im.width) + pad), bottom: Math.min(im.height, Math.ceil((bottom+1) / height * im.height) + pad) };
-  if (!im.bounds) im.mask = null; updateButtons();
+  if (!im.bounds) im.mask = null; updateErasedBounds(im);updateButtons();
 }
-function renderCut(im, width, height) { const c = document.createElement('canvas'); c.width = width; c.height = height; const ctx = c.getContext('2d'); if (!im.mask) return c; ctx.drawImage(im.img, 0, 0, width, height); ctx.globalCompositeOperation = 'destination-in'; ctx.drawImage(im.mask, 0, 0, width, height); ctx.globalCompositeOperation = 'source-over'; return c; }
-function outputBounds(im) { return im.crop && im.bounds ? { x: im.bounds.x, y: im.bounds.y, width: im.bounds.right - im.bounds.x, height: im.bounds.bottom - im.bounds.y } : { x: 0, y: 0, width: im.width, height: im.height }; }
+function imageBounds(im){return {x:0,y:0,width:im.width,height:im.height};}
+function updateErasedBounds(im){
+  im.erasedBounds=im.bounds;
+  if(!im.mask||!im.erasures?.length)return;
+  const c=element('canvas');c.width=im.mask.width;c.height=im.mask.height;const ctx=c.getContext('2d');
+  ctx.drawImage(im.mask,0,0);applyErasures(ctx,im.erasures,imageBounds(im),c.width,c.height);
+  const px=ctx.getImageData(0,0,c.width,c.height).data;let l=c.width,t=c.height,r=-1,b=-1;
+  for(let i=0;i<c.width*c.height;i++)if(px[i*4+3]){const x=i%c.width,y=Math.floor(i/c.width);l=Math.min(l,x);r=Math.max(r,x);t=Math.min(t,y);b=Math.max(b,y);}
+  im.erasedBounds=r<l?null:{x:Math.floor(l/c.width*im.width),y:Math.floor(t/c.height*im.height),right:Math.ceil((r+1)/c.width*im.width),bottom:Math.ceil((b+1)/c.height*im.height)};
+}
+function renderCut(im, width, height) { const c = document.createElement('canvas'); c.width = width; c.height = height; const ctx = c.getContext('2d'); if (!im.mask) return c; ctx.drawImage(im.img, 0, 0, width, height); ctx.globalCompositeOperation = 'destination-in'; ctx.drawImage(im.mask, 0, 0, width, height);ctx.globalCompositeOperation='source-over';applyErasures(ctx,im.erasures,imageBounds(im),width,height); return c; }
+function outputBounds(im) { const b=im.erasures?.length?im.erasedBounds:im.bounds;return im.crop && b ? { x:b.x,y:b.y,width:b.right-b.x,height:b.bottom-b.y } : imageBounds(im); }
 
 function draw() {
   const im=active();$('pins').replaceChildren();if(!im)return;
@@ -167,7 +185,12 @@ function draw() {
   }
   drawStrokes();
   if(keyboardVisible){const p=element('span','pin','+');p.style.left=(keyboardPoint.x*100)+'%';p.style.top=(keyboardPoint.y*100)+'%';$('pins').append(p);}
-  const rc=$('result'),ra=$('result-area'),bounds=showOriginal?{x:0,y:0,width:im.width,height:im.height}:outputBounds(im);
+  drawResult();
+}
+function drawResult(){
+  const im=active();if(!im)return;
+  const dpr=Math.min(2,devicePixelRatio||1),live=eraseStroke?.imageId===im.id?eraseStroke:null;
+  const rc=$('result'),ra=$('result-area'),bounds=showOriginal?imageBounds(im):live?.bounds||outputBounds(im);
   const rs=Math.max(.01,Math.min((ra.clientWidth-40)/bounds.width,(ra.clientHeight-40)/bounds.height));
   rc.width=Math.max(1,Math.round(bounds.width*rs*dpr));rc.height=Math.max(1,Math.round(bounds.height*rs*dpr));
   rc.style.width=Math.round(bounds.width*rs)+'px';rc.style.height=Math.round(bounds.height*rs)+'px';
@@ -178,6 +201,8 @@ function draw() {
     rx.globalCompositeOperation='destination-in';
     rx.drawImage(im.mask,bounds.x/im.width*im.mask.width,bounds.y/im.height*im.mask.height,bounds.width/im.width*im.mask.width,bounds.height/im.height*im.mask.height,0,0,rc.width,rc.height);
     rx.globalCompositeOperation='source-over';
+    applyErasures(rx,im.erasures,bounds,rc.width,rc.height);
+    if(live)applyErasures(rx,[live],bounds,rc.width,rc.height);
   }
   ra.style.backgroundColor=background==='transparent'?'':background;ra.style.backgroundImage=background==='transparent'?'':'none';
   $('output-size').textContent=im.mask?outputBounds(im).width.toLocaleString()+' × '+outputBounds(im).height.toLocaleString()+' px · 背景は透明':'';
@@ -319,11 +344,54 @@ function cancelStroke(){
   if($('canvas').hasPointerCapture(id))$('canvas').releasePointerCapture(id);
   drawStrokes();updateButtons();renderResultState();return true;
 }
+function moveEraseCursor(e){
+  const cursor=$('erase-cursor');
+  if(!ready(active())||showOriginal){cursor.hidden=true;return;}
+  const area=$('result-area').getBoundingClientRect(),size=eraseSizes[eraseSize];
+  cursor.style.width=size+'px';cursor.style.height=size+'px';
+  cursor.style.left=(e.clientX-area.left+$('result-area').scrollLeft)+'px';
+  cursor.style.top=(e.clientY-area.top+$('result-area').scrollTop)+'px';cursor.hidden=false;
+}
+function captureErasePoint(e){
+  const s=eraseStroke,r=s.rect,b=s.bounds;
+  const p={x:b.x+(e.clientX-r.left)/r.width*b.width,y:b.y+(e.clientY-r.top)/r.height*b.height};
+  const last=s.path.at(-1);
+  if(!last||p.x!==last.x||p.y!==last.y)s.path.push(p);
+}
+function cancelErase(){
+  if(!eraseStroke)return false;
+  const id=eraseStroke.pointerId;eraseStroke=null;
+  if($('result').hasPointerCapture(id))$('result').releasePointerCapture(id);
+  $('erase-cursor').hidden=true;drawResult();updateButtons();return true;
+}
+for(let i=0;i<eraseSizes.length;i++)$('erase-size-'+i).onclick=()=>{eraseSize=i;$('erase-cursor').hidden=true;updateButtons();};
+$('result').addEventListener('pointerdown',e=>{
+  if(eraseStroke||stroke||e.isPrimary===false||e.button!==0||!ready(active())||showOriginal||saving)return;
+  e.preventDefault();const im=active(),rect=$('result').getBoundingClientRect(),bounds=outputBounds(im);
+  eraseStroke={imageId:im.id,pointerId:e.pointerId,rect,bounds,radius:eraseSizes[eraseSize]*bounds.width/rect.width/2,path:[]};
+  captureErasePoint(e);$('result').setPointerCapture(e.pointerId);moveEraseCursor(e);drawResult();updateButtons();
+});
+$('result').addEventListener('pointermove',e=>{
+  if(eraseStroke&&e.pointerId!==eraseStroke.pointerId)return;
+  moveEraseCursor(e);if(!eraseStroke)return;
+  e.preventDefault();for(const p of e.getCoalescedEvents?.()||[])captureErasePoint(p);captureErasePoint(e);
+  if(!eraseFrame)eraseFrame=requestAnimationFrame(()=>{eraseFrame=0;drawResult();});
+});
+$('result').addEventListener('pointerup',e=>{
+  if(!eraseStroke||e.pointerId!==eraseStroke.pointerId)return;
+  e.preventDefault();captureErasePoint(e);const finished=eraseStroke;eraseStroke=null;
+  if($('result').hasPointerCapture(e.pointerId))$('result').releasePointerCapture(e.pointerId);
+  const im=active();if(im?.id===finished.imageId){saveHistory(im);(im.erasures||=[]).push({path:finished.path,radius:finished.radius});updateErasedBounds(im);}
+  $('erase-cursor').hidden=true;updateButtons();draw();
+});
+for(const type of ['pointercancel','lostpointercapture'])$('result').addEventListener(type,e=>{if(e.pointerId===eraseStroke?.pointerId)cancelErase();});
+$('result').addEventListener('pointerleave',()=>{if(!eraseStroke)$('erase-cursor').hidden=true;});
+$('erase-undo').onclick=()=>undo();
 $('canvas').addEventListener('pointerdown',e=>{
   if(stroke||e.isPrimary===false||(e.button!==0&&e.button!==2)||!active())return;
   const label=e.button===2||tool==='remove'?0:1;
   if(!label&&!object()){toast('先に残すものを選んでください');return;}
-  e.preventDefault();keyboardVisible=false;$('canvas').focus({preventScroll:true});
+  e.preventDefault();cancelErase();keyboardVisible=false;$('canvas').focus({preventScroll:true});
   stroke={imageId:activeId,pointerId:e.pointerId,label,mode:tool,rect:$('canvas').getBoundingClientRect(),path:[]};
   capturePoint(e);$('canvas').setPointerCapture(e.pointerId);draw();updateButtons();
 });
@@ -338,7 +406,7 @@ $('canvas').addEventListener('pointerup',e=>{
   if(finished.imageId===activeId)commitStroke(finished.path,finished.label,finished.mode);
 });
 for(const type of ['pointercancel','lostpointercapture'])$('canvas').addEventListener(type,e=>{if(e.pointerId===stroke?.pointerId)cancelStroke();});
-window.addEventListener('blur',()=>cancelStroke());
+window.addEventListener('blur',()=>{cancelStroke();cancelErase();});
 $('canvas').addEventListener('contextmenu',e=>e.preventDefault());
 $('canvas').addEventListener('keydown',e=>{
   const d=e.shiftKey?.05:.01;
@@ -349,26 +417,26 @@ $('canvas').addEventListener('keydown',e=>{
   }else if((e.key==='Enter'||e.key===' ')&&!stroke){e.preventDefault();addPoint(keyboardPoint.x,keyboardPoint.y);}
 });
 function undo(){
-  if(cancelStroke())return;
+  if(cancelErase()||cancelStroke())return;
   const im=active();if(!im?.history.length)return;
-  const saved=im.history.pop();im.version++;im.objects=saved.objects;im.objectId=saved.objectId;
+  const saved=im.history.pop();im.version++;im.objects=saved.objects;im.objectId=saved.objectId;im.erasures=saved.erasures||[];
   for(const [key,item]of pending)if(item.im===im)pending.delete(key);
   if(!im.objects.length)tool='add';recompute(im);renderLibrary();renderObjects();draw();
   for(const o of im.objects)if(o.points.length&&!o.masks)queueObject(im,o);
 }
 $('undo').onclick=undo;
-document.addEventListener('keydown',e=>{if(e.key==='Escape'&&cancelStroke())e.preventDefault();if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)){e.preventDefault();undo();}});
-$('reset').onclick=()=>{cancelStroke();const im=active();if(!im)return;saveHistory(im);im.version++;im.objects=[];im.objectId=null;im.message='';tool='add';for(const [key,item]of pending)if(item.im===im)pending.delete(key);recompute(im);renderLibrary();renderObjects();draw();status('選択を取り消しました');};
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&(cancelErase()||cancelStroke()))e.preventDefault();if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)){e.preventDefault();undo();}});
+$('reset').onclick=()=>{cancelStroke();cancelErase();const im=active();if(!im)return;saveHistory(im);im.version++;im.objects=[];im.erasures=[];im.objectId=null;im.message='';tool='add';for(const [key,item]of pending)if(item.im===im)pending.delete(key);recompute(im);renderLibrary();renderObjects();draw();status('選択を取り消しました');};
 for(const name of ['add','keep','remove'])$('tool-'+name).onclick=()=>setTool(name);
 $('refine').onclick=()=>setTool(tool==='add'?'keep':'add');$('refine-done').onclick=()=>setTool('add');
 $('finishing').ontoggle=renderCandidates;
-$('show-original').onclick=()=>{showOriginal=!showOriginal;updateButtons();draw();};
+$('show-original').onclick=()=>{cancelErase();showOriginal=!showOriginal;updateButtons();draw();};
 document.querySelectorAll('[data-bg]').forEach(b=>b.onclick=()=>{background=b.dataset.bg;document.querySelectorAll('[data-bg]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));draw();});
-for(const id of ['feather','threshold'])$(id).oninput=()=>{const im=active();if(!im)return;im[id]=Number($(id).value);updateAdjustmentLabels();recompute(im);draw();};
+for(const id of ['feather','threshold'])$(id).oninput=()=>{cancelErase();const im=active();if(!im)return;im[id]=Number($(id).value);updateAdjustmentLabels();recompute(im);draw();};
 $('threshold').onchange=renderObjects;
-$('crop').onchange=()=>{if(active())active().crop=$('crop').checked;draw();};
-new ResizeObserver(()=>draw()).observe($('canvas-area'));
-new ResizeObserver(()=>draw()).observe($('result-area'));
+$('crop').onchange=()=>{cancelErase();if(active())active().crop=$('crop').checked;draw();};
+new ResizeObserver(()=>{cancelErase();draw();}).observe($('canvas-area'));
+new ResizeObserver(()=>{cancelErase();draw();}).observe($('result-area'));
 for(const id of ['add-images','empty-add'])$(id).onclick=()=>$('file-input').click();
 $('file-input').onchange=async()=>{await addFiles(Array.from($('file-input').files));$('file-input').value='';};
 document.addEventListener('dragover',e=>{e.preventDefault();document.body.classList.add('dragging');});
@@ -381,6 +449,7 @@ function safeName(name) { return name.replace(/\.[^.]+$/,'').replace(/[\\/:*?"<>
 async function pngBlob(im) {
   if(!im.mask)throw Error('残す対象を選択してください'); const b=outputBounds(im), c=document.createElement('canvas');c.width=b.width;c.height=b.height;
   const ctx=c.getContext('2d');ctx.drawImage(im.img,-b.x,-b.y,im.width,im.height);ctx.globalCompositeOperation='destination-in';ctx.drawImage(im.mask,-b.x,-b.y,im.width,im.height);
+  applyErasures(ctx,im.erasures,b,c.width,c.height);
   return new Promise((resolve,reject)=>c.toBlob(blob=>blob?resolve(blob):reject(Error('PNGを書き出せません')),'image/png'));
 }
 function saveBlob(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}

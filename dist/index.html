@@ -5,8 +5,8 @@
   <meta name="theme-color" content="#f5f6f2"><meta name="description" content="写真から残したいものを選んで、透過PNGで保存。">
   <title>切り抜き</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%232e493c'/%3E%3Cpath d='M11 8v24M27 8L15 20l12 12' stroke='%23e0ecae' stroke-width='4' fill='none'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="./style.css">
-  <script>window.coi = { quiet: true };</script><script src="./coi-serviceworker.js?v=imgly-v2"></script><script type="module" src="./app.js?v=outline-v1"></script>
+  <link rel="stylesheet" href="./style.css?v=paint-v1">
+  <script>window.coi = { quiet: true };</script><script src="./coi-serviceworker.js?v=imgly-v2"></script><script type="module" src="./app.js?v=paint-v1"></script>
 </head>
 <body>
   <header class="topbar"><a class="brand" href="./"><span class="brand-mark">k</span><strong>切り抜き</strong></a><div class="top-actions"><span class="privacy"><span data-icon="lock"></span>写真はこの端末内で処理</span><button id="add-images"><span data-icon="plus"></span>画像を追加</button></div><input type="file" id="file-input" accept="image/*" multiple hidden></header>
@@ -29,7 +29,8 @@
           </section>
           <section class="photo-panel result-panel" aria-labelledby="result-heading">
             <div class="panel-heading"><h2 id="result-heading">仕上がり</h2><button id="show-original" class="text-button" aria-pressed="false" disabled>元の写真と見比べる</button></div>
-            <div class="result-area checker" id="result-area"><canvas id="result" role="img" aria-label="切り抜きの仕上がり" hidden></canvas><div class="result-placeholder" id="result-placeholder"><span data-icon="cutout"></span><span id="result-message">まだ選ばれていません</span><progress id="progress" max="100" hidden></progress><button id="retry" hidden>もう一度試す</button><details id="error-details" hidden><summary>詳細</summary><p id="error-detail"></p></details></div></div>
+            <div class="result-area checker" id="result-area"><canvas id="result" role="img" aria-label="切り抜きの仕上がり。なぞった部分を消しゴムで透明にする。" hidden></canvas><span id="erase-cursor" aria-hidden="true" hidden></span><div class="result-placeholder" id="result-placeholder"><span data-icon="cutout"></span><span id="result-message">まだ選ばれていません</span><progress id="progress" max="100" hidden></progress><button id="retry" hidden>もう一度試す</button><details id="error-details" hidden><summary>詳細</summary><p id="error-detail"></p></details></div></div>
+            <div class="erase-tools"><span>消しゴム</span><div class="erase-sizes" role="group" aria-label="消しゴムの太さ"><button id="erase-size-0" aria-label="消しゴムの太さ 1" aria-pressed="false" disabled><i style="--dot:4px"></i></button><button id="erase-size-1" aria-label="消しゴムの太さ 2" aria-pressed="false" disabled><i style="--dot:7px"></i></button><button id="erase-size-2" aria-label="消しゴムの太さ 3" aria-pressed="true" disabled><i style="--dot:11px"></i></button><button id="erase-size-3" aria-label="消しゴムの太さ 4" aria-pressed="false" disabled><i style="--dot:16px"></i></button><button id="erase-size-4" aria-label="消しゴムの太さ 5" aria-pressed="false" disabled><i style="--dot:22px"></i></button></div><button id="erase-undo" class="icon-button" aria-label="仕上がりを元に戻す" title="元に戻す (Ctrl+Z)" disabled><span data-icon="undo"></span></button></div>
             <div class="result-tools"><span id="result-count">透明の背景</span><div class="swatches" role="group" aria-label="確認用の背景色"><button class="swatch checker" data-bg="transparent" aria-label="透明の背景で確認" aria-pressed="true"></button><button class="swatch white" data-bg="#ffffff" aria-label="白の背景で確認" aria-pressed="false"></button><button class="swatch dark" data-bg="#292d29" aria-label="黒の背景で確認" aria-pressed="false"></button></div></div>
             <div class="save-area"><label class="check-row"><input type="checkbox" id="crop">余白を切り詰める</label><button class="primary" id="export" disabled><span data-icon="download"></span>透過PNGを保存</button><span id="output-size"></span></div>
           </section>

@@ -3,7 +3,7 @@ const {createCanvas,Image}=require(process.argv[2] || '@napi-rs/canvas');
 function el(tag='div'){
  const e=tag==='canvas'?createCanvas(1,1):{};
  Object.assign(e,{style:{},children:[],hidden:false,disabled:false,value:'0',clientWidth:500,clientHeight:360,attrs:{},listeners:{},capture:null,
- append(...v){this.children.push(...v);},replaceChildren(...v){this.children=[...v];},setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},addEventListener(k,fn){this.listeners[k]=fn;},classList:{add(){},remove(){}},
+ append(...v){this.children.push(...v);},replaceChildren(...v){this.children=[...v];},setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},addEventListener(k,fn){this.listeners[k]=fn;},classList:{add(){},remove(){},toggle(){}},
  getBoundingClientRect(){return {left:10,top:20,width:400,height:300};},setPointerCapture(id){this.capture=id;},hasPointerCapture(id){return this.capture===id;},releasePointerCapture(){this.capture=null;},focus(){}});
  if(tag==='canvas')e.toBlob=fn=>fn(new Blob([e.toBuffer('image/png')],{type:'image/png'}));
  return e;
@@ -11,13 +11,15 @@ function el(tag='div'){
 const html=fs.readFileSync(require('node:path').join(__dirname,'dist/index.html'),'utf8');
 const nodes=Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(m=>[m[1],el(['canvas','result','stroke-overlay'].includes(m[1])?'canvas':'div')]));
 nodes.feather.value='1';nodes.threshold.value='0';
-const sent=[],workers=[],timers=new Map();let timerId=0;
+const sent=[],workers=[],timers=new Map(),frames=new Map();let timerId=0,frameId=0;
+function flushFrames(){const queued=[...frames.values()];frames.clear();for(const fn of queued)fn();}
 class MockWorker {constructor(){workers.push(this);}postMessage(job){sent.push(structuredClone(job));}terminate(){this.terminated=true;}}
 const ctx=vm.createContext({console,Uint8Array,Float32Array,Map,Blob,URL,Request,Response,ReadableStream,
  document:{getElementById:id=>{assert.ok(nodes[id],'Missing DOM id: '+id);return nodes[id];},createElement:el,querySelectorAll:()=>[],addEventListener(){},body:el()},
  navigator:{},isSecureContext:false,devicePixelRatio:1,Image:class{constructor(){return el('img');}},Worker:MockWorker,ResizeObserver:class{observe(){}},
- window:el(),requestAnimationFrame:()=>1,setTimeout(fn){timers.set(++timerId,fn);return timerId;},clearTimeout(id){timers.delete(id);},sessionStorage:{getItem(){return null;}},location:{reload(){}}});
+ window:el(),requestAnimationFrame:fn=>{frames.set(++frameId,fn);return frameId;},setTimeout(fn){timers.set(++timerId,fn);return timerId;},clearTimeout(id){timers.delete(id);},sessionStorage:{getItem(){return null;}},location:{reload(){}}});
 vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'dist/outline-mask.js'),'utf8').replace(/^export /gm,''),ctx);
+vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'dist/erase-paint.js'),'utf8').replace(/^export /gm,''),ctx);
 vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'dist/app.js'),'utf8').replace(/^import .*;\n/gm,''),ctx);
 const run=code=>vm.runInContext(code,ctx);
 ctx.fixture=createCanvas(8,8);const fx=ctx.fixture.getContext('2d');fx.fillStyle='#e05040';fx.fillRect(0,0,8,8);
@@ -30,6 +32,9 @@ function result(rect){
 }
 function pointer(type,x,y,extra={}){
  nodes.canvas.listeners[type]({clientX:10+400*x,clientY:20+300*y,pointerId:1,pointerType:'mouse',isPrimary:true,button:0,preventDefault(){},...extra});
+}
+function paint(type,x,y,extra={}){
+ nodes.result.listeners[type]({clientX:10+400*x,clientY:20+300*y,pointerId:7,pointerType:'mouse',isPrimary:true,button:0,preventDefault(){},...extra});
 }
 (async()=>{
  // The production outline reconstruction closes seams and fills interior gaps.
@@ -157,6 +162,50 @@ function pointer(type,x,y,extra={}){
  const filled=await run('pngBlob(active())');decoded.src=Buffer.from(await filled.arrayBuffer());await decoded.decode();
  exported.getContext('2d').clearRect(0,0,8,8);exported.getContext('2d').drawImage(decoded,0,0);
  assert.deepEqual(Array.from(exported.getContext('2d').getImageData(3,3,1,1).data),[23,104,203,255]);
+ // Erasing is a local alpha edit: live before release, continuous between sparse
+ // pointer samples, one undo entry per stroke, and no inference request.
+ ctx.paintFixture=createCanvas(200,160);const pfx=ctx.paintFixture.getContext('2d');pfx.fillStyle='#1768cb';pfx.fillRect(0,0,200,160);
+ run("Object.assign(active(),{img:paintFixture,width:200,height:160,erasures:[],history:[],crop:false,feather:0});Object.assign(object(),{width:200,height:160,masks:new Float32Array(32000).fill(8),choice:0});recompute(active());draw()");
+ const paintRequests=sent.length;
+ for(let size=0;size<5;size++){
+   nodes['erase-size-'+size].onclick();paint('pointerdown',.5,.5);
+   assert.equal(run('active().history.length'),0);assert.equal(run('active().erasures.length'),0);
+   assert.equal(nodes.result.getContext('2d').getImageData(nodes.result.width/2,nodes.result.height/2,1,1).data[3],0);
+   assert.equal(nodes.export.disabled,true);paint('pointerup',.5,.5);assert.equal(run('active().history.length'),1);nodes['erase-undo'].onclick();
+   assert.equal(run('active().erasures.length'),0);assert.equal(nodes.export.disabled,false);
+ }
+ nodes['erase-size-4'].onclick();paint('pointerdown',.25,.5);paint('pointermove',.75,.5);flushFrames();
+ assert.equal(nodes.result.getContext('2d').getImageData(nodes.result.width/2,nodes.result.height/2,1,1).data[3],0);
+ assert.equal(run('active().history.length'),0);paint('pointerup',.75,.5);assert.equal(run('active().history.length'),1);
+ run('recompute(active());draw()');
+ const erased=await run('pngBlob(active())');decoded.src=Buffer.from(await erased.arrayBuffer());await decoded.decode();
+ const paintOutput=createCanvas(200,160);paintOutput.getContext('2d').drawImage(decoded,0,0);
+ assert.equal(paintOutput.getContext('2d').getImageData(100,80,1,1).data[3],0);
+ assert.deepEqual(Array.from(paintOutput.getContext('2d').getImageData(100,10,1,1).data),[23,104,203,255]);
+ assert.equal(sent.length,paintRequests);nodes['erase-undo'].onclick();
+ assert.equal(run('renderCut(active(),200,160).getContext("2d").getImageData(100,80,1,1).data[3]'),255);
+ // Touch/pen cancellation and a second finger cannot commit or consume history.
+ for(const ending of ['pointercancel','lostpointercapture']){
+   paint('pointerdown',.5,.5,{pointerType:'touch'});paint('pointerdown',.2,.2,{pointerId:8,isPrimary:false});paint('pointerup',.2,.2,{pointerId:8});
+   paint(ending,.5,.5);assert.equal(run('active().erasures.length'),0);assert.equal(run('active().history.length'),0);
+ }
+ paint('pointerdown',.5,.5,{pointerType:'pen'});run('undo()');assert.equal(run('active().history.length'),0);assert.equal(run('eraseStroke'),null);
+ // A cropped preview maps back to the same original pixels in PNG output.
+ run("object().masks.fill(-8);for(let y=30;y<130;y++)for(let x=40;x<160;x++)object().masks[y*200+x]=8;recompute(active());active().crop=true;draw()");
+ const cb=run('outputBounds(active())');nodes['erase-size-2'].onclick();paint('pointerdown',.25,.25);paint('pointerup',.25,.25);
+ const pointX=Math.floor(cb.x+cb.width*.25),pointY=Math.floor(cb.y+cb.height*.25);
+ ctx.paintX=pointX;ctx.paintY=pointY;
+ assert.equal(run('renderCut(active(),200,160).getContext("2d").getImageData(paintX,paintY,1,1).data[3]'),0);
+ const cropErase=await run('pngBlob(active())');decoded.src=Buffer.from(await cropErase.arrayBuffer());await decoded.decode();
+ const cropOutput=createCanvas(decoded.width,decoded.height),eb=run('outputBounds(active())');cropOutput.getContext('2d').drawImage(decoded,0,0);
+ assert.equal(cropOutput.getContext('2d').getImageData(pointX-eb.x,pointY-eb.y,1,1).data[3],0);
+ run("images.push({...active(),id:'other',erasures:[],history:[]});selectImage('other')");
+ assert.equal(run('renderCut(active(),200,160).getContext("2d").getImageData(paintX,paintY,1,1).data[3]'),255);
+ run("selectImage('test')");assert.equal(run('active().erasures.length'),1);
+ paint('pointerdown',.5,.5);run("selectImage('other')");paint('pointerup',.5,.5);assert.equal(run('active().erasures.length'),0);
+ run("selectImage('test');$('show-original').onclick()");paint('pointerdown',.5,.5);assert.equal(run('eraseStroke'),null);
+ assert.equal(sent.length,paintRequests);
+ console.log('PASS: five eraser sizes; live alpha while dragging; continuous strokes; one-step undo; no inference; cancellation; cropped PNG coordinates; original RGB; per-image isolation.');
  console.log('PASS: separate clicks; mask union; PNG alpha/dimensions; crop; drag sampling and single release inference; touch/pen; capture/cancel; one-step stroke undo; stale reply protection; bounded prompts.');
  console.log('PASS: unresponsive worker recovery and finite fallback; fresh-worker retry; IMG.LY preprocessing, complete foreground selection, plate/food union, sparse correction only when needed.');
  console.log('PASS: one outer-contour mask; interior holes and narrow seams filled; exclusions, concavities, separate objects, image borders and soft edges preserved; PNG uses original RGB.');
