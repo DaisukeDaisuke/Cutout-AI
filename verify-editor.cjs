@@ -2,20 +2,21 @@ const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/st
 const {createCanvas,Image}=require(process.argv[2] || '@napi-rs/canvas');
 function el(tag='div'){
  const e=tag==='canvas'?createCanvas(1,1):{};
- Object.assign(e,{style:{},children:[],hidden:false,disabled:false,value:'0',clientWidth:500,clientHeight:360,attrs:{},
- append(...v){this.children.push(...v);},replaceChildren(...v){this.children=[...v];},setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},addEventListener(){},classList:{add(){},remove(){}}});
+ Object.assign(e,{style:{},children:[],hidden:false,disabled:false,value:'0',clientWidth:500,clientHeight:360,attrs:{},listeners:{},capture:null,
+ append(...v){this.children.push(...v);},replaceChildren(...v){this.children=[...v];},setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},addEventListener(k,fn){this.listeners[k]=fn;},classList:{add(){},remove(){}},
+ getBoundingClientRect(){return {left:10,top:20,width:400,height:300};},setPointerCapture(id){this.capture=id;},hasPointerCapture(id){return this.capture===id;},releasePointerCapture(){this.capture=null;},focus(){}});
  if(tag==='canvas')e.toBlob=fn=>fn(new Blob([e.toBuffer('image/png')],{type:'image/png'}));
  return e;
 }
 const html=fs.readFileSync(require('node:path').join(__dirname,'dist/index.html'),'utf8');
-const nodes=Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(m=>[m[1],el(m[1]==='canvas'||m[1]==='result'?'canvas':'div')]));
+const nodes=Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(m=>[m[1],el(['canvas','result','stroke-overlay'].includes(m[1])?'canvas':'div')]));
 nodes.feather.value='1';nodes.threshold.value='0';
 const sent=[];
-class MockWorker {postMessage(job){sent.push(job);}terminate(){}}
+class MockWorker {postMessage(job){sent.push(structuredClone(job));}terminate(){}}
 const ctx=vm.createContext({console,Uint8Array,Float32Array,Map,Blob,URL,Request,Response,ReadableStream,
  document:{getElementById:id=>{assert.ok(nodes[id],'Missing DOM id: '+id);return nodes[id];},createElement:el,querySelectorAll:()=>[],addEventListener(){},body:el()},
  navigator:{},isSecureContext:false,devicePixelRatio:1,Image:class{constructor(){return el('img');}},Worker:MockWorker,ResizeObserver:class{observe(){}},
- setTimeout:()=>0,clearTimeout(){},sessionStorage:{getItem(){return null;}},location:{reload(){}}});
+ window:el(),requestAnimationFrame:()=>1,setTimeout:()=>0,clearTimeout(){},sessionStorage:{getItem(){return null;}},location:{reload(){}}});
 vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'dist/app.js'),'utf8'),ctx);
 const run=code=>vm.runInContext(code,ctx);
 ctx.fixture=createCanvas(8,8);const fx=ctx.fixture.getContext('2d');fx.fillStyle='#e05040';fx.fillRect(0,0,8,8);
@@ -25,6 +26,9 @@ function result(rect){
  for(let c=0;c<3;c++)for(let y=rect[1];y<rect[3];y++)for(let x=rect[0];x<rect[2];x++)data[c*64+y*8+x]=8;
  ctx.reply={type:'result',requestId:job.requestId,width:8,height:8,masks:data,scores:[.9,.5,.3]};
  run('worker.onmessage({data:reply})');
+}
+function pointer(type,x,y,extra={}){
+ nodes.canvas.listeners[type]({clientX:10+400*x,clientY:20+300*y,pointerId:1,pointerType:'mouse',isPrimary:true,button:0,preventDefault(){},...extra});
 }
 (async()=>{
  run('addPoint(.2,.2)');assert.equal(run('active().objects.length'),1);assert.equal(nodes.export.disabled,true);
@@ -48,7 +52,38 @@ function result(rect){
  const cropped=await run('pngBlob(active())');decoded.src=Buffer.from(await cropped.arrayBuffer());await decoded.decode();assert.equal(decoded.width,5);assert.equal(decoded.height,5);
  run("$('reset').onclick()");assert.equal(run('active().objects.length'),0);assert.equal(nodes.export.disabled,true);
  run('undo()');assert.equal(run('active().objects.length'),2);
- console.log('PASS: click adds separate items; partial work cannot export; mask union; PNG alpha and dimensions; refinement; stale reply ignored after undo; exclude; crop; reset/undo.');
+ // A complete drag is one selection and one inference, regardless of move count.
+ run("$('reset').onclick()");const before=sent.length,history=run('active().history.length');
+ pointer('pointerdown',.2,.25);assert.equal(nodes.canvas.capture,1);assert.equal(run('active().objects.length'),0);
+ pointer('pointermove',.6,.25,{getCoalescedEvents:()=>[{clientX:170,clientY:95}]});
+ assert.equal(sent.length,before);assert.equal(run('active().history.length'),history);
+ pointer('pointerup',.8,.25);assert.equal(nodes.canvas.capture,null);
+ assert.equal(sent.length,before+1);assert.equal(run('active().objects.length'),1);assert.equal(run('active().history.length'),history+1);
+ const prompts=sent.at(-1).points;assert.ok(prompts.length>2&&prompts.length<=64);assert.ok(prompts.every(p=>p.label===1&&p.y===.25));
+ assert.equal(prompts[0].x,.2);assert.equal(prompts.at(-1).x,.8);assert.ok(prompts.some(p=>p.x>.45&&p.x<.55));
+ assert.equal(nodes.pins.children.length,1);result([1,1,7,7]);
+ // Touch cancellation, secondary fingers, capture loss and image switches are atomic.
+ const completedCount=sent.length;
+ for(const ending of ['pointercancel','lostpointercapture']){
+  pointer('pointerdown',.1,.1,{pointerType:'touch'});assert.equal(nodes.export.disabled,true);
+  pointer('pointerdown',.9,.9,{pointerId:2,isPrimary:false});pointer('pointerup',.9,.9,{pointerId:2});
+  assert.equal(run('stroke.path[0].x'),.1);pointer('pointermove',.4,.4);pointer(ending,.4,.4);
+  assert.equal(sent.length,completedCount);assert.equal(run('active().objects.length'),1);assert.equal(nodes.export.disabled,false);
+ }
+ pointer('pointerdown',.1,.1);run("selectImage('test')");pointer('pointerup',.8,.8);assert.equal(sent.length,completedCount);
+ // Refining with a touch stroke extends the same object; undo removes the whole stroke.
+ run("setTool('remove')");pointer('pointerdown',.8,.8,{pointerType:'touch'});pointer('pointermove',.5,.8,{pointerType:'touch'});pointer('pointerup',.3,.8,{pointerType:'touch'});
+ assert.equal(run('active().objects.length'),1);assert.equal(run('object().strokes.length'),2);assert.ok(sent.at(-1).points.slice(prompts.length).every(p=>p.label===0));
+ run('undo()');assert.equal(run('object().points.length'),prompts.length);assert.equal(run('object().strokes.length'),1);
+ result([0,0,8,8]);assert.equal(run("active().mask.getContext('2d').getImageData(0,0,1,1).data[3]"),0);
+ // Cancelled drags do not consume earlier history. Long, out-of-bounds drags stay bounded.
+ const restoredHistory=run('active().history.length');pointer('pointerdown',.2,.2);run('undo()');assert.equal(run('active().history.length'),restoredHistory);
+ run("setTool('keep')");pointer('pointerdown',0,.2,{pointerType:'pen'});
+ for(let i=0;i<2500;i++)pointer('pointermove',(i%2)*1.2,.2+(i%10)/20,{pointerType:'pen'});
+ assert.ok(run('stroke.path.length')<=1024);pointer('pointerup',1.2,.5,{pointerType:'pen'});
+ const extra=sent.at(-1).points.slice(prompts.length);assert.ok(extra.length<=64);assert.equal(extra.at(-1).x,1);assert.ok(extra.every(p=>p.x>=0&&p.x<=1&&p.y>=0&&p.y<=1));
+ result([1,1,7,7]);run('undo();undo()');assert.equal(run('active().objects.length'),0);
+ console.log('PASS: separate clicks; mask union; PNG alpha/dimensions; crop; drag sampling and single release inference; touch/pen; capture/cancel; one-step stroke undo; stale reply protection; bounded prompts.');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 
 

@@ -22,8 +22,8 @@
         <div class="file-heading"><div><strong id="filename"></strong><span id="dimensions"></span></div><button id="remove-image" class="icon-button" aria-label="この画像を削除" title="この画像を削除"><span data-icon="trash"></span></button></div>
         <div class="workbench">
           <section class="photo-panel source-panel" aria-labelledby="select-heading">
-            <div class="panel-heading"><h2 id="select-heading">残すものを選ぶ</h2><span class="action-label" id="action-label">写真をクリック</span></div>
-            <div class="canvas-area" id="canvas-area"><div class="image-frame" id="frame"><canvas id="canvas" tabindex="0" role="img" aria-label="残したいものをクリック。矢印キーで位置を選びEnterで追加。"></canvas><div id="pins"></div></div></div>
+            <div class="panel-heading"><h2 id="select-heading">残すものを選ぶ</h2><span class="action-label" id="action-label">なぞって選ぶ</span></div>
+            <div class="canvas-area" id="canvas-area"><div class="image-frame" id="frame"><canvas id="canvas" tabindex="0" role="img" aria-label="残すものをなぞる、またはクリック。矢印キーで位置を選びEnterで追加。"></canvas><canvas id="stroke-overlay" aria-hidden="true"></canvas><div id="pins"></div></div></div>
             <div class="photo-tools"><button id="tool-add" aria-pressed="true"><span data-icon="plus-circle"></span>残すものを追加</button><span class="spacer"></span><button id="undo" class="icon-button" aria-label="元に戻す" title="元に戻す (Ctrl+Z)" disabled><span data-icon="undo"></span></button><button class="text-button" id="reset" disabled>やり直す</button></div>
             <div class="selection-area"><div class="selection-heading"><strong>残すもの <span id="object-count">0</span></strong><button class="text-button" id="refine" disabled aria-expanded="false">選択を直す</button></div><div id="object-list" class="object-list"></div><div id="refine-tools" class="refine-tools" hidden><span id="refine-label"></span><button id="tool-keep" aria-pressed="false">残す範囲を広げる</button><button id="tool-remove" aria-pressed="false">余分な所を除く</button><button id="refine-done" class="text-button">完了</button></div></div>
           </section>

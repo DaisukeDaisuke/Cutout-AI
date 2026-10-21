@@ -13,6 +13,7 @@ const nextId = () => 'local-'+(++localId);
 let activeId = null, tool = 'add', background = 'transparent', showOriginal = false;
 let worker, busy = false, requestCounter = 0, activeRequest = null, bootReady = false, engineError = '';
 let saving = false, toastTimer, keyboardVisible = false;
+let stroke = null, strokeFrame = 0;
 const pending = new Map();
 const keyboardPoint = { x:.5, y:.5 };
 function active() { return images.find(im => im.id === activeId); }
@@ -22,9 +23,9 @@ function toast(message) { $('toast').textContent=message;$('toast').hidden=false
 function status(message) { $('status').textContent=message; }
 function selectedObjects(im) { return im?.objects.filter(o => o.enabled && o.points.length) || []; }
 function waiting(im) { return selectedObjects(im).some(o => !o.masks); }
-function ready(im) { return !!im?.mask && !waiting(im); }
-function createObject(im) { const o={id:nextId(),number:im.nextObject++,enabled:true,points:[],masks:null,scores:[],choice:0,version:0,error:''};im.objects.push(o);im.objectId=o.id;return o; }
-function saveHistory(im) { im.history.push({objects:im.objects.map(o=>({...o,points:o.points.map(p=>({...p}))})),objectId:im.objectId});if(im.history.length>20)im.history.shift(); }
+function ready(im) { return !!im?.mask && !waiting(im) && stroke?.imageId!==im.id; }
+function createObject(im) { const o={id:nextId(),number:im.nextObject++,enabled:true,points:[],strokes:[],masks:null,scores:[],choice:0,version:0,error:''};im.objects.push(o);im.objectId=o.id;return o; }
+function saveHistory(im) { im.history.push({objects:im.objects.map(o=>({...o,points:o.points.map(p=>({...p})),strokes:[...o.strokes]})),objectId:im.objectId});if(im.history.length>20)im.history.shift(); }
 
 async function addFiles(files) {
   let firstAdded;
@@ -58,6 +59,7 @@ function renderLibrary() {
   $('image-count').textContent=images.length;updateButtons();
 }
 function selectImage(id) {
+  cancelStroke();
   activeId=images.find(i=>i.id===id)?.id||null;const im=active();
   $('empty').hidden=!!im;$('editing').hidden=!im;showOriginal=false;tool='add';keyboardVisible=false;
   $('finishing').open=false;
@@ -115,14 +117,14 @@ function updateButtons() {
   $('refine').setAttribute('aria-expanded',String(tool!=='add'&&!!o));$('refine-tools').hidden=tool==='add'||!o;
   $('refine-label').textContent=o?'選択 '+o.number+' を調整':'';
   for(const name of ['add','keep','remove'])$('tool-'+name).setAttribute('aria-pressed',String(tool===name));
-  $('action-label').textContent={add:'写真をクリック',keep:'残す所をクリック',remove:'除く所をクリック'}[tool];
+  $('action-label').textContent={add:'なぞって選ぶ',keep:'なぞって広げる',remove:'なぞって除く'}[tool];
   for(const id of ['feather','threshold','crop'])$(id).disabled=!im?.mask;
   const count=images.filter(im=>im.selected&&ready(im)).length;
   $('export-batch').disabled=!count||saving;$('batch-label').textContent=count?count+'枚をまとめて保存':'まとめて保存';
   $('batch-count').textContent=count?'選択した完成画像をZIPで保存':'完成した画像をZIPで保存';
 }
 function updateAdjustmentLabels() { $('feather-value').textContent=$('feather').value;const t=Number($('threshold').value);$('threshold-value').textContent=t===0?'標準':t>0?'広め':'狭め'; }
-function setTool(value) {tool=value;updateButtons();draw();}
+function setTool(value) {cancelStroke();tool=value;updateButtons();draw();}
 function recompute(im) {
   const objects = im.objects.filter(o => o.enabled && o.masks);
   if (!objects.length) { im.mask = null; im.bounds = null; updateButtons(); return; }
@@ -155,10 +157,12 @@ function draw() {
     // Leave selected food in full color and dim the surrounding photo.
     ctx.fillStyle='rgba(22,36,27,.36)';ctx.fillRect(0,0,cw,ch);ctx.drawImage(renderCut(im,cw,ch),0,0);
   }
-  for(const o of im.objects)if(o.enabled)for(const p of o.points){
+  for(const o of im.objects)if(o.enabled)for(const s of o.strokes){
+    const p={...s.path[0],label:s.label};
     const pin=element('span','pin'+(p.label===0?' negative':'')+(o.id===im.objectId?'':' inactive'),p.label===0?'−':String(o.number));
     pin.style.left=(p.x*100)+'%';pin.style.top=(p.y*100)+'%';$('pins').append(pin);
   }
+  drawStrokes();
   if(keyboardVisible){const p=element('span','pin','+');p.style.left=(keyboardPoint.x*100)+'%';p.style.top=(keyboardPoint.y*100)+'%';$('pins').append(p);}
   const rc=$('result'),ra=$('result-area'),bounds=showOriginal?{x:0,y:0,width:im.width,height:im.height}:outputBounds(im);
   const rs=Math.max(.01,Math.min((ra.clientWidth-40)/bounds.width,(ra.clientHeight-40)/bounds.height));
@@ -180,11 +184,11 @@ function draw() {
 function renderResultState(){
   const im=active();if(!im)return;const selected=selectedObjects(im);
   const error=selected.find(o=>o.error)?.error||(selected.length?engineError:'');
-  const processing=waiting(im)&&!error;
+  const drawing=stroke?.imageId===im.id,processing=waiting(im)&&!error;
   const placeholder=$('result-placeholder');placeholder.hidden=ready(im)&&!error||showOriginal;
   placeholder.className='result-placeholder'+(error?' error':processing?' working':'');
   $('result').hidden=!im.mask&&!showOriginal;
-  $('result-message').textContent=error?'切り抜きを実行できませんでした':processing?(im.message||'切り抜きを準備しています'):selected.length?'残す範囲が見つかりませんでした':'まだ選ばれていません';
+  $('result-message').textContent=error?'切り抜きを実行できませんでした':drawing?'選択中':processing?(im.message||'切り抜きを準備しています'):selected.length?'残す範囲が見つかりませんでした':'まだ選ばれていません';
   $('retry').hidden=!error;$('error-details').hidden=!error;$('error-detail').textContent=error;
   $('progress').hidden=!processing;
   if(Number.isFinite(im.progress))$('progress').value=im.progress;else $('progress').removeAttribute('value');
@@ -230,18 +234,86 @@ function processQueue(){
   busy=true;activeRequest={requestId:++requestCounter,imageId:im.id,objectId:o.id,version:o.version,imageVersion:im.version};
   worker.postMessage({type:'segment',...activeRequest,url:im.url,points:o.points});updateButtons();
 }
-function addPoint(x,y,negative=false){
-  const im=active();if(!im)return;const label=negative||tool==='remove'?0:1;
+const clamp = value => Math.max(0,Math.min(1,value));
+// Arc-length sampling makes slow, fast and coalesced pointer events equivalent.
+// Keep every gesture as one prompt group, with at most 64 decoder points.
+function sampleStroke(path,im,label){
+  const scale=Math.max(im.width,im.height);
+  const distance=(a,b)=>Math.hypot((a.x-b.x)*im.width/scale,(a.y-b.y)*im.height/scale);
+  const lengths=[0];
+  for(let i=1;i<path.length;i++)lengths.push(lengths[i-1]+distance(path[i-1],path[i]));
+  const length=lengths.at(-1);
+  if(!length)return [{...path[0],label}];
+  const count=Math.min(64,Math.max(2,Math.ceil(length/.025)+1)),points=[];
+  let j=1;
+  for(let i=0;i<count;i++){
+    const target=length*i/(count-1);
+    while(j<path.length-1&&lengths[j]<target)j++;
+    const t=(target-lengths[j-1])/(lengths[j]-lengths[j-1]||1),a=path[j-1],b=path[j];
+    points.push({x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t,label});
+  }
+  return points;
+}
+function commitStroke(path,label,mode=tool){
+  const im=active();if(!im)return;
   let o=object(im);
   if(!label&&!o){toast('先に残すものを選んでください');return;}
+  if(mode!=='add'&&!o)return;
   saveHistory(im);
-  // In the default tool, every click is another item to retain.
-  if(label&&tool==='add')o=createObject(im);
+  if(label&&mode==='add')o=createObject(im);
   if(!o)return;
-  o.enabled=true;o.points.push({x:Math.max(0,Math.min(1,x)),y:Math.max(0,Math.min(1,y)),label});
+  o.enabled=true;o.strokes.push({path,label});o.points.push(...sampleStroke(path,im,label));
   queueObject(im,o);status(selectedObjects(im).length+'個を選択');
 }
-$('canvas').addEventListener('pointerdown',e=>{if(e.button!==0&&e.button!==2)return;keyboardVisible=false;const r=$('canvas').getBoundingClientRect();addPoint((e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height,e.button===2);});
+function addPoint(x,y,negative=false){commitStroke([{x:clamp(x),y:clamp(y)}],negative||tool==='remove'?0:1);}
+function drawStrokes(){
+  const im=active(),overlay=$('stroke-overlay'),canvas=$('canvas');
+  overlay.width=canvas.width;overlay.height=canvas.height;
+  if(!im)return;
+  const ctx=overlay.getContext('2d'),w=overlay.width,h=overlay.height,dpr=Math.min(2,devicePixelRatio||1);
+  function line(s,selected=true){
+    ctx.globalAlpha=selected ? .9 : .45;ctx.lineCap='round';ctx.lineJoin='round';ctx.beginPath();
+    s.path.forEach((p,i)=>i?ctx.lineTo(p.x*w,p.y*h):ctx.moveTo(p.x*w,p.y*h));
+    if(s.path.length===1)ctx.lineTo(s.path[0].x*w+.1,s.path[0].y*h);
+    ctx.strokeStyle='#fff';ctx.lineWidth=7*dpr;ctx.stroke();
+    ctx.strokeStyle=s.label?'#326343':'#ad3f37';ctx.lineWidth=4*dpr;ctx.stroke();
+  }
+  for(const o of im.objects)if(o.enabled)for(const s of o.strokes)line(s,o.id===im.objectId);
+  if(stroke?.imageId===im.id)line(stroke);
+}
+function scheduleStrokeDraw(){if(!strokeFrame)strokeFrame=requestAnimationFrame(()=>{strokeFrame=0;drawStrokes();});}
+function capturePoint(e){
+  const r=stroke.rect,p={x:clamp((e.clientX-r.left)/r.width),y:clamp((e.clientY-r.top)/r.height)},last=stroke.path.at(-1);
+  if(p.x!==last?.x||p.y!==last?.y)stroke.path.push(p);
+  // Bound raw input storage during very long gestures without truncating the end.
+  if(stroke.path.length>1024)stroke.path=stroke.path.filter((_,i)=>i%2===0||i===stroke.path.length-1);
+}
+function cancelStroke(){
+  if(!stroke)return false;
+  const id=stroke.pointerId;stroke=null;
+  if($('canvas').hasPointerCapture(id))$('canvas').releasePointerCapture(id);
+  drawStrokes();updateButtons();renderResultState();return true;
+}
+$('canvas').addEventListener('pointerdown',e=>{
+  if(stroke||e.isPrimary===false||(e.button!==0&&e.button!==2)||!active())return;
+  const label=e.button===2||tool==='remove'?0:1;
+  if(!label&&!object()){toast('先に残すものを選んでください');return;}
+  e.preventDefault();keyboardVisible=false;$('canvas').focus({preventScroll:true});
+  stroke={imageId:activeId,pointerId:e.pointerId,label,mode:tool,rect:$('canvas').getBoundingClientRect(),path:[]};
+  capturePoint(e);$('canvas').setPointerCapture(e.pointerId);draw();updateButtons();
+});
+$('canvas').addEventListener('pointermove',e=>{
+  if(!stroke||e.pointerId!==stroke.pointerId)return;
+  e.preventDefault();for(const p of e.getCoalescedEvents?.()||[])capturePoint(p);capturePoint(e);scheduleStrokeDraw();
+});
+$('canvas').addEventListener('pointerup',e=>{
+  if(!stroke||e.pointerId!==stroke.pointerId)return;
+  e.preventDefault();capturePoint(e);const finished=stroke;stroke=null;
+  if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);
+  if(finished.imageId===activeId)commitStroke(finished.path,finished.label,finished.mode);
+});
+for(const type of ['pointercancel','lostpointercapture'])$('canvas').addEventListener(type,e=>{if(e.pointerId===stroke?.pointerId)cancelStroke();});
+window.addEventListener('blur',()=>cancelStroke());
 $('canvas').addEventListener('contextmenu',e=>e.preventDefault());
 $('canvas').addEventListener('keydown',e=>{
   const d=e.shiftKey?.05:.01;
@@ -249,9 +321,10 @@ $('canvas').addEventListener('keydown',e=>{
     e.preventDefault();keyboardVisible=true;
     if(e.key==='ArrowLeft')keyboardPoint.x-=d;if(e.key==='ArrowRight')keyboardPoint.x+=d;if(e.key==='ArrowUp')keyboardPoint.y-=d;if(e.key==='ArrowDown')keyboardPoint.y+=d;
     keyboardPoint.x=Math.max(0,Math.min(1,keyboardPoint.x));keyboardPoint.y=Math.max(0,Math.min(1,keyboardPoint.y));draw();
-  }else if(e.key==='Enter'||e.key===' '){e.preventDefault();addPoint(keyboardPoint.x,keyboardPoint.y);}
+  }else if((e.key==='Enter'||e.key===' ')&&!stroke){e.preventDefault();addPoint(keyboardPoint.x,keyboardPoint.y);}
 });
 function undo(){
+  if(cancelStroke())return;
   const im=active();if(!im?.history.length)return;
   const saved=im.history.pop();im.version++;im.objects=saved.objects;im.objectId=saved.objectId;
   for(const [key,item]of pending)if(item.im===im)pending.delete(key);
@@ -259,8 +332,8 @@ function undo(){
   for(const o of im.objects)if(o.points.length&&!o.masks)queueObject(im,o);
 }
 $('undo').onclick=undo;
-document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)){e.preventDefault();undo();}});
-$('reset').onclick=()=>{const im=active();if(!im)return;saveHistory(im);im.version++;im.objects=[];im.objectId=null;im.message='';tool='add';for(const [key,item]of pending)if(item.im===im)pending.delete(key);recompute(im);renderLibrary();renderObjects();draw();status('選択を取り消しました');};
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&cancelStroke())e.preventDefault();if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)){e.preventDefault();undo();}});
+$('reset').onclick=()=>{cancelStroke();const im=active();if(!im)return;saveHistory(im);im.version++;im.objects=[];im.objectId=null;im.message='';tool='add';for(const [key,item]of pending)if(item.im===im)pending.delete(key);recompute(im);renderLibrary();renderObjects();draw();status('選択を取り消しました');};
 for(const name of ['add','keep','remove'])$('tool-'+name).onclick=()=>setTool(name);
 $('refine').onclick=()=>setTool(tool==='add'?'keep':'add');$('refine-done').onclick=()=>setTool('add');
 $('finishing').ontoggle=renderCandidates;
