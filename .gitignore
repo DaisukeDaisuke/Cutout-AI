@@ -1,0 +1,4 @@
+/dist/samples/
+/upload/
+node_modules/
+.DS_Store

@@ -1,0 +1,60 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Check JavaScript
+        run: |
+          for file in dist/*.js verify-*.cjs; do
+            node --check "$file"
+          done
+      - name: Verify model cache
+        run: |
+          curl --fail --location --retry 3 \
+            https://cdn.jsdelivr.net/npm/hash-wasm@4.12.0/dist/xxhash64.umd.min.js \
+            --output "$RUNNER_TEMP/xxhash64.cjs"
+          node verify-cache.cjs "$RUNNER_TEMP/xxhash64.cjs"
+      - name: Verify editor and PNG output
+        run: |
+          npm install --prefix "$RUNNER_TEMP/editor-check" --no-save --ignore-scripts @napi-rs/canvas@0.1.100
+          node verify-editor.cjs "$RUNNER_TEMP/editor-check/node_modules/@napi-rs/canvas"
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

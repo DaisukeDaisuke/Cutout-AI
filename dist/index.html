@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f5f6f2"><meta name="description" content="写真から残したいものを選んで、透過PNGで保存。">
+  <title>切り抜き</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%232e493c'/%3E%3Cpath d='M11 8v24M27 8L15 20l12 12' stroke='%23e0ecae' stroke-width='4' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./style.css">
+  <script>window.coi = { quiet: true };</script><script src="./coi-serviceworker.js"></script><script type="module" src="./app.js"></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="./"><span class="brand-mark">k</span><strong>切り抜き</strong></a><div class="top-actions"><span class="privacy"><span data-icon="lock"></span>写真はこの端末内で処理</span><button id="add-images"><span data-icon="plus"></span>画像を追加</button></div><input type="file" id="file-input" accept="image/*" multiple hidden></header>
+  <main class="workspace">
+    <aside class="library" aria-label="画像一覧">
+      <div class="library-heading"><h1>画像 <span id="image-count">0</span></h1></div>
+      <div id="image-list" class="image-list"></div>
+      <div class="library-footer"><button id="export-batch" disabled><span data-icon="download"></span><span id="batch-label">まとめて保存</span></button><span id="batch-count">完成した画像をZIPで保存</span></div>
+    </aside>
+    <section class="editor" aria-label="切り抜き編集">
+      <div class="empty-state" id="empty"><span class="empty-icon" data-icon="image"></span><button class="primary" id="empty-add"><span data-icon="plus"></span>画像を追加</button><span>JPEG / PNG / WebP · 複数選択可</span></div>
+      <div id="editing" hidden>
+        <div class="file-heading"><div><strong id="filename"></strong><span id="dimensions"></span></div><button id="remove-image" class="icon-button" aria-label="この画像を削除" title="この画像を削除"><span data-icon="trash"></span></button></div>
+        <div class="workbench">
+          <section class="photo-panel source-panel" aria-labelledby="select-heading">
+            <div class="panel-heading"><h2 id="select-heading">残すものを選ぶ</h2><span class="action-label" id="action-label">写真をクリック</span></div>
+            <div class="canvas-area" id="canvas-area"><div class="image-frame" id="frame"><canvas id="canvas" tabindex="0" role="img" aria-label="残したいものをクリック。矢印キーで位置を選びEnterで追加。"></canvas><div id="pins"></div></div></div>
+            <div class="photo-tools"><button id="tool-add" aria-pressed="true"><span data-icon="plus-circle"></span>残すものを追加</button><span class="spacer"></span><button id="undo" class="icon-button" aria-label="元に戻す" title="元に戻す (Ctrl+Z)" disabled><span data-icon="undo"></span></button><button class="text-button" id="reset" disabled>やり直す</button></div>
+            <div class="selection-area"><div class="selection-heading"><strong>残すもの <span id="object-count">0</span></strong><button class="text-button" id="refine" disabled aria-expanded="false">選択を直す</button></div><div id="object-list" class="object-list"></div><div id="refine-tools" class="refine-tools" hidden><span id="refine-label"></span><button id="tool-keep" aria-pressed="false">残す範囲を広げる</button><button id="tool-remove" aria-pressed="false">余分な所を除く</button><button id="refine-done" class="text-button">完了</button></div></div>
+          </section>
+          <section class="photo-panel result-panel" aria-labelledby="result-heading">
+            <div class="panel-heading"><h2 id="result-heading">仕上がり</h2><button id="show-original" class="text-button" aria-pressed="false" disabled>元の写真と見比べる</button></div>
+            <div class="result-area checker" id="result-area"><canvas id="result" role="img" aria-label="切り抜きの仕上がり" hidden></canvas><div class="result-placeholder" id="result-placeholder"><span data-icon="cutout"></span><span id="result-message">まだ選ばれていません</span><progress id="progress" max="100" hidden></progress><button id="retry" hidden>もう一度試す</button><details id="error-details" hidden><summary>詳細</summary><p id="error-detail"></p></details></div></div>
+            <div class="result-tools"><span id="result-count">透明の背景</span><div class="swatches" role="group" aria-label="確認用の背景色"><button class="swatch checker" data-bg="transparent" aria-label="透明の背景で確認" aria-pressed="true"></button><button class="swatch white" data-bg="#ffffff" aria-label="白の背景で確認" aria-pressed="false"></button><button class="swatch dark" data-bg="#292d29" aria-label="黒の背景で確認" aria-pressed="false"></button></div></div>
+            <div class="save-area"><label class="check-row"><input type="checkbox" id="crop">余白を切り詰める</label><button class="primary" id="export" disabled><span data-icon="download"></span>透過PNGを保存</button><span id="output-size"></span></div>
+          </section>
+        </div>
+        <details class="finishing" id="finishing"><summary>仕上がりを調整</summary><div class="finishing-content"><div><h3 id="candidate-label">切り抜く範囲</h3><div class="mask-choices" id="mask-choices"></div></div><div class="sliders"><label for="feather">輪郭をなめらかに<output id="feather-value">1</output></label><input id="feather" type="range" min="0" max="5" step="0.5" value="1"><label for="threshold">輪郭の広さ<output id="threshold-value">標準</output></label><input id="threshold" type="range" min="-3" max="3" step="0.1" value="0"></div></div></details>
+        <div class="statusline"><span id="status" role="status" aria-live="polite"></span><details class="technical"><summary>動作情報</summary><span id="runtime">準備中</span></details></div>
+      </div>
+    </section>
+  </main>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>
