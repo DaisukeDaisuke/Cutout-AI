@@ -218,7 +218,7 @@ function failWorker(message){
 }
 function ensureWorker(){
   if(worker)return;
-  worker=new Worker('./inference-worker.js',{type:'module'});
+  worker=new Worker('./inference-worker.js?v=imgly-v2',{type:'module'});
   const instance=worker;
   worker.onmessage=({data})=>{
     if(worker!==instance||!activeRequest||data.requestId!==activeRequest.requestId)return;
@@ -411,7 +411,7 @@ async function boot(){
   try{
     await Promise.race([
       (async()=>{
-        const registration=navigator.serviceWorker.register('./coi-serviceworker.js',{updateViaCache:'none'});
+        const registration=navigator.serviceWorker.register('./coi-serviceworker.js?v=imgly-v2',{updateViaCache:'none'});
         await registration;
         await navigator.serviceWorker.ready;
         if(!navigator.serviceWorker.controller)await new Promise(resolve=>navigator.serviceWorker.addEventListener('controllerchange',resolve,{once:true}));

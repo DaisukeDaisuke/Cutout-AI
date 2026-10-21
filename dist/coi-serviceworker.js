@@ -2,7 +2,7 @@
 let coepCredentialless = false;
 if (typeof window === 'undefined') {
     // App extension: preserve COI behavior and serve verified, chunk-cached models.
-    importScripts('./model-cache.js');
+    importScripts('./model-cache.js?v=imgly-v2');
     self.addEventListener("install", () => self.skipWaiting());
     self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
